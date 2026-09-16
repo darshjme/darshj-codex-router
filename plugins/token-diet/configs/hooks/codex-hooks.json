@@ -1,0 +1,73 @@
+{
+  "description": "Mohini curated work continuity + memory-bus recall. SessionStart is routed through `memory-bus hook codex`, which still runs lifecycle.py (reviewed checkpoints, activity receipts, snapshots), caps its additionalContext to 1,500 chars and appends <=1,000 tokens of memory-bus recall for the current workspace. All other events call lifecycle.py directly and are unchanged. Never reads raw transcripts or credential files.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 $HOME/.local/share/memory-bus/bin/memory-bus hook codex --max-tokens 1000",
+            "timeout": 12,
+            "additionalContextLimit": 6000
+          }
+        ],
+        "matcher": "startup|resume|clear|compact"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 $HOME/.codex/skills/mohini-memory/scripts/lifecycle.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 $HOME/.codex/skills/mohini-memory/scripts/lifecycle.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 $HOME/.codex/skills/mohini-memory/scripts/lifecycle.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 $HOME/.codex/skills/mohini-memory/scripts/lifecycle.py",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 $HOME/.codex/skills/mohini-memory/scripts/lifecycle.py",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

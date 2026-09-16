@@ -1,5 +1,15 @@
 # Changes
 
+## 2026-09-17 (token-diet plugin)
+
+- New `plugins/token-diet`: `apply.py` (status/apply/uninstall with dated backups) for
+  Codex, Grok CLI, Claude Code and DJcode settings; the memory-bus service (FastAPI +
+  Qdrant `engrams`, int8-quantized MiniLM embeddings, Ollama engram compression), the Mac
+  client with `tunnel`, `recall`, `compress` and hook modes, the launchd sync, hook
+  templates, and the sanitized audit (`docs/FINDINGS.md`, `docs/SSOT.md`).
+- Hosts and home paths are parameters (`MB_SSH_HOST`, `MEMORY_BUS_SSH`, `$HOME`); the
+  service binds loopback only.
+
 ## 2026-09-16 (grok persist)
 
 - CLI session ids are written to `state/sessions.json`. A router restart

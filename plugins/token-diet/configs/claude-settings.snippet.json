@@ -1,0 +1,10 @@
+{
+  "effortLevel": "medium",
+  "autoCompactWindow": 200000,
+  "bashOutputMaxChars": 30000,
+  "env": {
+    "MAX_MCP_OUTPUT_TOKENS": "20000",
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}

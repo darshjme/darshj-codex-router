@@ -1,0 +1,17 @@
+{
+  "_comment": "Merge into ~/.claude/settings.json `hooks`. Adds ONE UserPromptSubmit hook that injects <=1,200 tokens of memory-bus recall as additionalContext (Claude Code hooks: stdout JSON {hookSpecificOutput:{hookEventName:'UserPromptSubmit', additionalContext}}). Keep the existing coach hooks; D3 replaces the SessionStart feedback_fable5 dump with this recall. The command exits 0 and prints nothing when the bus is unreachable, so prompts never stall (timeout 6s).",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/share/memory-bus/bin/memory-bus hook claude --max-tokens 1200",
+            "timeout": 6,
+            "statusMessage": "memory-bus recall"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+# token-diet: tables apply.py merges into ~/.grok/config.toml (grok CLI 1.0.30)
+[models]
+default_reasoning_effort = "medium"
+
+[session]
+auto_compact_threshold_percent = 30
+
+[compaction.pruning]
+enabled = true
+keep_last_n_turns = 3
+soft_trim_threshold = 3000
+soft_trim_head = 1200
+soft_trim_tail = 800
+hard_clear_age_turns = 8
+
+[compaction.memory_flush]
+enabled = true
+soft_threshold_tokens = 4000
+max_flush_write_chars = 4000
+idle_timeout_secs = 0
+
+[mcp]
+max_output_bytes = 20000
+
+[skills]
+ignore = ["~/.agents/skills", "~/.claude/skills"]   # hides, deletes nothing
+
+[compat.claude]
+skills = false
+hooks = false
+mcps = false
+agents = true

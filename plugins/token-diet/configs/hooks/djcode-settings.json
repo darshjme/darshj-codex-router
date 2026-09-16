@@ -1,0 +1,16 @@
+{
+  "_comment": "DJcode (~/repos/djcode_cli, Claude Code fork) validates the same hook schema (src/types/hooks.ts:80-81 UserPromptSubmit.additionalContext). Config dir resolves via CLAUDE_CONFIG_DIR || homedir (src/utils/env.ts:25); the orchestrator must confirm the settings filename DJcode reads under ~/.djcode (no settings.json exists there today) before applying. Remote recall keeps DJcode's local gemma4/chroma store untouched; recall comes from Kali through the same client.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/share/memory-bus/bin/memory-bus hook djcode --max-tokens 1000",
+            "timeout": 6
+          }
+        ]
+      }
+    ]
+  }
+}

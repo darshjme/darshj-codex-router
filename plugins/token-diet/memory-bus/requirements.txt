@@ -1,0 +1,8 @@
+# Installed into /opt/memory-bus/.venv created with `uv venv --system-site-packages`
+# so the already-present system torch 2.10 / sentence-transformers 5.2.3 / qdrant-client 1.17
+# are reused (no 2 GB torch re-download). These pins only add what is not guaranteed.
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+pydantic>=2.6,<3
+qdrant-client>=1.12,<2
+sentence-transformers>=3.0

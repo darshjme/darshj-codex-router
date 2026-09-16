@@ -1,0 +1,45 @@
+[Unit]
+Description=memory-bus: Qdrant supercompress memory bus for CLI agents (127.0.0.1:8791)
+Documentation=file:/opt/memory-bus/README.md
+After=network-online.target docker.service ollama.service
+Wants=network-online.target
+# Qdrant runs as the docker container "qdrant"; ollama.service is optional (LLM engrams degrade to extractive)
+# Bind only to loopback; clients reach it through `memory-bus tunnel` or a tailnet address (MB_HOSTS).
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/memory-bus
+EnvironmentFile=-/opt/memory-bus/memory-bus.env
+Environment=HF_HUB_OFFLINE=1
+Environment=HF_HOME=/root/.cache/huggingface
+Environment=TOKENIZERS_PARALLELISM=false
+Environment=OMP_NUM_THREADS=8
+Environment=MB_HOSTS=127.0.0.1
+Environment=MB_PORT=8791
+Environment=MB_BIND_TAILNET=1
+Environment=MB_QDRANT_URL=http://127.0.0.1:6333
+Environment=MB_COLLECTION=engrams
+Environment=MB_MODEL=sentence-transformers/all-MiniLM-L6-v2
+Environment=MB_OLLAMA_URL=http://127.0.0.1:11434
+Environment=MB_OLLAMA_MODEL=qwen2.5:3b
+Environment=MB_OLLAMA_THREADS=32
+Environment=MB_LLM_MODE=queue
+ExecStart=/opt/memory-bus/.venv/bin/python -m memory_bus.app
+Restart=always
+RestartSec=3
+TimeoutStartSec=180
+TimeoutStopSec=20
+KillSignal=SIGINT
+# resource guard: model ~90MB, torch runtime ~1.5GB RSS
+MemoryMax=6G
+CPUWeight=80
+Nice=5
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/memory-bus /root/.cache/huggingface
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>__LABEL__</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>/usr/bin/python3 __HOME__/.local/share/memory-bus/bin/memory-bus tunnel >/dev/null 2>&amp;1; exec /usr/bin/python3 __HOME__/.local/share/memory-bus/bin/memory_bus_sync.py</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>MEMORY_BUS_URL</key>
+		<string>http://127.0.0.1:8791</string>
+		<key>MEMORY_BUS_SSH</key>
+		<string>__SSH__</string>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>1800</integer>
+	<key>StandardOutPath</key>
+	<string>__HOME__/.local/share/memory-bus/sync.log</string>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/.local/share/memory-bus/sync-error.log</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>LowPriorityIO</key>
+	<true/>
+</dict>
+</plist>

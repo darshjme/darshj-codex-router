@@ -1,0 +1,12 @@
+# token-diet: keys apply.py sets in ~/.codex/config.toml (codex 0.154; strict-parse validated)
+model_auto_compact_token_limit = 110000        # global compaction ceiling
+model_auto_compact_token_limit_scope = "total"
+tool_output_token_limit = 8000                 # history budget per tool output
+project_doc_max_bytes = 4096                   # AGENTS.md cap
+include_apps_instructions = false
+
+[skills]
+max_context_tokens = 1200                      # default is 2% of the window (~5k tokens)
+
+[features]
+recommended_plugins = false

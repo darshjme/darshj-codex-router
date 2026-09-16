@@ -350,6 +350,14 @@ headers Codex reads from each response, on both the HTTP and WebSocket paths.
 The same numbers feed the dashboard's Usage tab. Codex's separate account
 usage poll still goes to chatgpt.com and reflects the OpenAI account.
 
+## Plugins
+
+- [`plugins/token-diet`](plugins/token-diet/README.md) — cuts per-turn token spend across
+  Codex, the bridges, Claude Code, Grok CLI and DJcode (compaction ceilings, prefix trims,
+  tool-output bounds, effort defaults) and installs a quantized Qdrant memory bus with a
+  `memory-bus` client and recall hooks so agents retrieve ≤1.2k tokens of memory instead of
+  loading files. Measured first-turn input on the Grok path 56k → 24k tokens.
+
 ## Known limits
 
 - Audio, video and file attachments are rejected with an explicit error; only
