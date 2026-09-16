@@ -26,7 +26,7 @@ const DCR = (function () {
   const HINT_UNREACHABLE = 'Router unreachable — check `launchctl list | grep codex-router`';
   const HINT_LOG = 'check the log in ~/repos/darshj-codex-router/state/ and restart with `' + RESTART_CMD + '`';
   const DEFAULT_OLLAMA_URL = 'http://127.0.0.1:11434';
-  const TS_KEYS = ['timeseries', 'series', 'buckets', 'rows', 'items', 'data'];
+  const TS_KEYS = ['rows', 'timeseries', 'series', 'items', 'data'];   // note: `buckets` is the list of bucket starts, not rows
   const REQ_KEYS = ['requests', 'rows', 'items', 'data'];
   const MODEL_KEYS = ['models', 'items', 'data'];
   const WINDOW_KEYS = ['windows', 'usage', 'latest', 'rows', 'items'];
@@ -127,6 +127,25 @@ const DCR = (function () {
     }
     return [];
   }
+  /** GET /usage windows: a list of rows, or an object nested provider→window→row / window→row. */
+  function normWindows(payload) {
+    const list = listOf(payload, WINDOW_KEYS);
+    if (list.length || !payload || typeof payload !== 'object') return list;
+    const src = ['windows', 'usage', 'latest'].map(k => payload[k]).find(v => v && typeof v === 'object' && !Array.isArray(v));
+    if (!src) return [];
+    const out = [];
+    Object.keys(src).forEach(k1 => {
+      const v1 = src[k1];
+      if (!v1 || typeof v1 !== 'object') return;
+      if (v1.utilization != null) { out.push(Object.assign({ provider: 'claude', window: k1 }, v1)); return; }
+      Object.keys(v1).forEach(k2 => {
+        const v2 = v1[k2];
+        if (v2 && typeof v2 === 'object' && v2.utilization != null) out.push(Object.assign({ provider: k1, window: k2 }, v2));
+      });
+    });
+    return out;
+  }
+  function countOf(v) { return Array.isArray(v) ? v.length : num(v); }
   function storage(key, value) {
     try {
       if (value === undefined) return localStorage.getItem(key);
@@ -179,8 +198,9 @@ const DCR = (function () {
     healthError: null,
     models: null,                          // GET /models list
     settings: null,                        // GET /settings object
-    overview: { loaded: false, loading: false, error: null, summary: null, rows: [], prevRows: null, recent: [], mode: 'chart' },
-    requests: { loaded: false, loading: false, error: null, rows: [], provider: '', status: '', done: false, expanded: new Set() },
+    // per-view load state; `models_` / `settings_` hold view status while `models` / `settings` hold the data
+    overview: { loaded: false, loading: false, error: null, summary: null, ts: null, prevTs: null, recent: [], mode: 'chart' },
+    requests: { loaded: false, loading: false, error: null, rows: [], next: null, provider: '', status: '', done: false, expanded: new Set() },
     models_: { loaded: false, loading: false, error: null },
     usage: { loaded: false, loading: false, error: null, windows: [], counts: null },
     settings_: { loaded: false, loading: false, error: null, rotatedToken: null, confirmRotate: false },
@@ -199,7 +219,7 @@ const DCR = (function () {
       case 401: return 'Session expired — sign in again with your dashboard token';
       case 403: return 'Request blocked (same-origin only) — open ' + ROUTER_ORIGIN + '/dashboard/ directly';
       case 404: return (msg || 'Endpoint not found') + ' — the router may be an older build; restart it with `' + RESTART_CMD + '`';
-      case 429: return 'Too many attempts — wait 10 minutes, then try again';
+      case 429: return msg || 'Too many attempts — wait 10 minutes, then try again';   // server says how long to wait
       case 400:
       case 422: return (msg || 'Invalid value') + ' — check the value and try again';
       default:
@@ -258,20 +278,29 @@ const DCR = (function () {
   const charts = (function () {
     const chartData = new WeakMap();   // host element → { buckets, geom, range, bucket, focus }
 
-    /** Group timeseries rows into a full grid of buckets (empty periods show as zero). */
-    function buildBuckets(rows, range, now) {
-      const bucket = BUCKET_MS[range], span = RANGE_MS[range];
-      const start = Math.floor((now - span) / bucket) * bucket;
-      const end = Math.floor(now / bucket) * bucket;
+    /** Group timeseries rows into a full grid of buckets (empty periods show as zero).
+     *  Uses the payload's own `buckets` (bucket starts) and `bucket_s` when present, else the SSOT auto grid. */
+    function buildBuckets(payload, range, now) {
+      const rows = listOf(payload, TS_KEYS);
+      const meta = payload && !Array.isArray(payload) ? payload : {};
+      const bucket = num(meta.bucket_s) > 0 ? num(meta.bucket_s) * 1000 : BUCKET_MS[range];
       const blank = t => ({ t, values: { claude: 0, openai: 0, grok: 0, ollama: 0 }, total: 0, errors: 0 });
       const map = new Map();
-      for (let t = start; t <= end; t += bucket) map.set(t, blank(t));
-      for (const r of rows || []) {
+      if (Array.isArray(meta.buckets) && meta.buckets.length) meta.buckets.forEach(t => map.set(toMs(t), blank(toMs(t))));
+      else {
+        const start = Math.floor((now - RANGE_MS[range]) / bucket) * bucket, end = Math.floor(now / bucket) * bucket;
+        for (let t = start; t <= end; t += bucket) map.set(t, blank(t));
+      }
+      const first = Math.min.apply(null, Array.from(map.keys()));
+      for (const r of rows) {
         const p = String(r.provider || '').toLowerCase();
         if (!SERIES.includes(p)) continue;               // router rows (commands) are not a model provider
-        const t = Math.floor(toMs(r.t) / bucket) * bucket;
-        if (t < start) continue;
-        if (!map.has(t)) map.set(t, blank(t));
+        let t = toMs(r.t);
+        if (!map.has(t)) {
+          t = Math.floor(t / bucket) * bucket;
+          if (t < first) continue;
+          if (!map.has(t)) map.set(t, blank(t));
+        }
         const b = map.get(t), n = num(r.requests);
         b.values[p] += n; b.total += n; b.errors += num(r.errors);
       }
@@ -416,7 +445,8 @@ const DCR = (function () {
       const total = document.createElement('div'); total.className = 'tip-row tip-total';
       const tv = document.createElement('span'); tv.className = 'tip-val'; tv.textContent = fmtInt(b.total);
       const tn = document.createElement('span'); tn.className = 'tip-name'; tn.textContent = 'total' + (b.errors ? ' · ' + fmtInt(b.errors) + ' errors' : '');
-      total.append(document.createElement('span'), tv, tn); tip.appendChild(total);
+      const spacer = document.createElement('span'); spacer.className = 'tip-key'; spacer.style.visibility = 'hidden';
+      total.append(spacer, tv, tn); tip.appendChild(total);
       tip.hidden = false;
 
       // position: beside the bar, flipped when it would overflow the host
@@ -491,7 +521,28 @@ const DCR = (function () {
 
   /* ================================================================ components */
 
-  /** Normalise GET /stats/summary: totals + per provider + per model (SSOT §5 field names, flat or nested latency). */
+  /** One aggregate block (totals / a provider / a model). `input_tokens` includes cached tokens:
+   *  fresh = input − cached and cache hit = cached ÷ input, matching stats.py. */
+  function normBucket(b) {
+    b = b || {};
+    const lat = b.latency || {}, tok = b.tokens || {};
+    const input = num(b.input_tokens != null ? b.input_tokens : tok.input);
+    const cached = num(b.cached_tokens != null ? b.cached_tokens : tok.cached);
+    const output = num(b.output_tokens != null ? b.output_tokens : tok.output);
+    return {
+      requests: num(b.requests), errors: num(b.errors),
+      input_tokens: input, cached_tokens: cached, output_tokens: output,
+      fresh_tokens: b.fresh_tokens != null ? num(b.fresh_tokens) : Math.max(input - cached, 0),
+      latency_avg: b.latency_avg != null ? num(b.latency_avg) : (lat.avg != null ? num(lat.avg) : null),
+      latency_p50: b.latency_p50 != null ? num(b.latency_p50) : (lat.p50 != null ? num(lat.p50) : null),
+      latency_p95: b.latency_p95 != null ? num(b.latency_p95) : (lat.p95 != null ? num(lat.p95) : null),
+      resumed_ratio: b.resumed_ratio != null ? num(b.resumed_ratio) : null,
+      cache_hit_ratio: b.cache_hit_ratio != null ? num(b.cache_hit_ratio) : (input > 0 ? cached / input : 0),
+      tool_calls: num(b.tool_calls),
+      active_threads: b.active_threads != null ? num(b.active_threads) : null
+    };
+  }
+  /** Normalise GET /stats/summary: totals + per provider + per model, plus the optional exact `previous` period. */
   function normSummary(raw) {
     const s = raw || {};
     const totalsRaw = s.totals || s.total || s.all || s;
@@ -501,44 +552,33 @@ const DCR = (function () {
       if (Array.isArray(v)) { const o = {}; v.forEach(it => { if (it && it[key] != null) o[String(it[key]).toLowerCase()] = it; }); return o; }
       return v && typeof v === 'object' ? v : {};
     };
-    const bucket = b => {
-      b = b || {};
-      const lat = b.latency || {}, tok = b.tokens || {};
-      const input = num(b.input_tokens != null ? b.input_tokens : tok.input);
-      const cached = num(b.cached_tokens != null ? b.cached_tokens : tok.cached);
-      const output = num(b.output_tokens != null ? b.output_tokens : tok.output);
-      return {
-        requests: num(b.requests), errors: num(b.errors),
-        input_tokens: input, cached_tokens: cached, output_tokens: output,
-        latency_avg: b.latency_avg != null ? num(b.latency_avg) : (lat.avg != null ? num(lat.avg) : null),
-        latency_p50: b.latency_p50 != null ? num(b.latency_p50) : (lat.p50 != null ? num(lat.p50) : null),
-        latency_p95: b.latency_p95 != null ? num(b.latency_p95) : (lat.p95 != null ? num(lat.p95) : null),
-        resumed_ratio: b.resumed_ratio != null ? num(b.resumed_ratio) : null,
-        cache_hit_ratio: b.cache_hit_ratio != null ? num(b.cache_hit_ratio) : (input + cached > 0 ? cached / (input + cached) : 0),
-        tool_calls: num(b.tool_calls)
-      };
-    };
     const providers = {};
     const pm = toMap(provRaw, 'provider');
-    Object.keys(pm).forEach(k => { providers[k.toLowerCase()] = bucket(pm[k]); });
+    Object.keys(pm).forEach(k => { providers[k.toLowerCase()] = normBucket(pm[k]); });
     const models = {};
     const mm = toMap(modelRaw, 'model');
-    Object.keys(mm).forEach(k => { models[k] = bucket(mm[k]); });
-    const active = s.active_threads != null ? s.active_threads : (s.threads != null ? s.threads : totalsRaw.active_threads);
-    return { totals: bucket(totalsRaw), providers, models, active_threads: active != null ? num(active) : null };
+    Object.keys(mm).forEach(k => { models[k] = normBucket(mm[k]); });
+    const totals = normBucket(totalsRaw);
+    const active = s.active_threads != null ? num(s.active_threads) : (s.threads != null ? num(s.threads) : totals.active_threads);
+    const prevRaw = s.previous && typeof s.previous === 'object' ? (s.previous.totals || s.previous) : null;
+    return { totals, providers, models, active_threads: active, previous: prevRaw ? normBucket(prevRaw) : null };
   }
 
-  /** Sums over [now-span, now) and [now-2span, now-span) from the next-larger timeseries, so both sides share a bucket grid. */
-  function comparison(prevRows, range) {
-    if (!Array.isArray(prevRows)) return null;
+  /** Fallback when the summary carries no `previous`: sums over [now-span, now) and [now-2span, now-span)
+   *  from the next-larger timeseries, so both sides share one bucket grid. */
+  function comparison(prevPayload, range) {
+    const rows = prevPayload ? listOf(prevPayload, TS_KEYS) : null;
+    if (!rows) return null;
     const span = RANGE_MS[range], now = Date.now();
     const sum = (from, to) => {
       const acc = { requests: 0, errors: 0, input_tokens: 0, cached_tokens: 0, output_tokens: 0 };
-      for (const r of prevRows) {
+      for (const r of rows) {
         const t = toMs(r.t);
         if (t < from || t >= to) continue;
         for (const k in acc) acc[k] += num(r[k]);
       }
+      acc.fresh_tokens = Math.max(acc.input_tokens - acc.cached_tokens, 0);
+      acc.cache_hit_ratio = acc.input_tokens > 0 ? acc.cached_tokens / acc.input_tokens : 0;
       return acc;
     };
     return { cur: sum(now - span, now), prev: sum(now - 2 * span, now - span) };
@@ -548,7 +588,7 @@ const DCR = (function () {
     if (prev === 0 && cur === 0) return '<span class="delta">— no change ' + esc(label) + '</span>';
     if (prev === 0) return '<span class="delta ' + (upIsGood ? 'good' : 'bad') + '"><span class="arrow" aria-hidden="true">▲</span><span class="sr-only">up,</span> new ' + esc(label) + '</span>';
     const diff = pp ? cur - prev : (cur - prev) / prev;
-    const flat = Math.abs(diff) < (pp ? 0.0005 : 0.0005), up = diff > 0;
+    const flat = Math.abs(diff) < 0.0005, up = diff > 0;
     const cls = flat ? '' : (up === upIsGood ? 'good' : 'bad');
     const arrow = flat ? '—' : (up ? '▲' : '▼');
     const amount = pp ? (Math.abs(diff) * 100).toFixed(1).replace(/\.0$/, '') + ' pp' : fmtPct(Math.abs(diff), 1);
@@ -593,7 +633,7 @@ const DCR = (function () {
       list = emptyHtml('Ollama not detected at ' + base, 'Install from ollama.com, run `ollama pull llama3.2`, then Refresh.');
     }
     const statusChip = state.health
-      ? '<span class="chip"><span class="dot ' + (online ? 'good' : 'critical') + '" aria-hidden="true"></span>' + (online ? 'Online' : 'Offline') + ' · ' + fmtInt(h.models) + ' models</span>'
+      ? '<span class="chip"><span class="dot ' + (online ? 'good' : 'critical') + '" aria-hidden="true"></span>' + (online ? 'Online' : 'Offline') + ' · ' + fmtInt(countOf(h.models)) + ' models</span>'
       : '';
     return '<section class="card" aria-labelledby="' + id + '-title" data-panel="ollama">' +
       '<div class="card-head"><div><p class="eyebrow">Local models</p><h2 id="' + id + '-title">Ollama</h2></div>' + statusChip + '</div>' +
@@ -679,22 +719,26 @@ const DCR = (function () {
       const results = await Promise.allSettled([
         api.get('/stats/summary?range=' + range),
         api.get('/stats/timeseries?range=' + range + '&bucket=auto'),
-        next ? api.get('/stats/timeseries?range=' + next + '&bucket=auto') : Promise.resolve(null),
         api.get('/requests?limit=10')
       ]);
+      if (state.range !== range || state.mode !== 'app') { o.loading = false; return; }   // superseded while in flight
+      const [s, ts, rec] = results;
+      if (s.status === 'fulfilled') o.summary = normSummary(s.value);
+      if (ts.status === 'fulfilled') o.ts = ts.value;
+      if (rec.status === 'fulfilled') o.recent = listOf(rec.value, REQ_KEYS);
+      // deltas come from summary.previous; a server without it gets the derived comparison from the next-larger range
+      o.prevTs = null;
+      if (o.summary && !o.summary.previous && next) {
+        try { o.prevTs = await api.get('/stats/timeseries?range=' + next + '&bucket=auto'); }
+        catch (e) { o.prevTs = null; }
+        if (state.range !== range || state.mode !== 'app') { o.loading = false; return; }
+      }
       o.loading = false;
       this.root().classList.remove('is-loading');
-      if (state.range !== range || state.mode !== 'app') return;      // superseded while in flight
-      const [s, ts, prev, rec] = results;
-      if (s.status === 'fulfilled') o.summary = normSummary(s.value);
-      if (ts.status === 'fulfilled') o.rows = listOf(ts.value, TS_KEYS);
-      if (prev.status === 'fulfilled') o.prevRows = prev.value ? listOf(prev.value, TS_KEYS) : null;
-      if (rec.status === 'fulfilled') o.recent = listOf(rec.value, REQ_KEYS);
       const failed = results.filter(r => r.status === 'rejected');
       const coreOk = s.status === 'fulfilled' && ts.status === 'fulfilled';
       o.error = coreOk || o.loaded ? null : failed[0].reason;
       o.loaded = o.loaded || coreOk;
-      o.loadedRange = coreOk ? range : o.loadedRange;
       if (failed.length) reportError(failed[0].reason, !!opts.silent);
       this.paint(false);
     },
@@ -707,24 +751,22 @@ const DCR = (function () {
             '<div class="grid-2">' + skel('sk-card') + skel('sk-card') + '</div>';
           return;
         }
-        const range = state.range, t = o.summary.totals, cmp = comparison(o.prevRows, range), vs = 'vs prev ' + range;
-        const cur = cmp ? cmp.cur : {}, prev = cmp ? cmp.prev : {};
-        const pick = k => cmp ? [cur[k], prev[k]] : [null, null];
-        const hit = pair => (pair[0] == null ? null : (pair[0].input + pair[0].cached > 0 ? pair[0].cached / (pair[0].input + pair[0].cached) : 0));
-        const curHit = cmp ? hit([{ input: cur.input_tokens, cached: cur.cached_tokens }]) : null;
-        const prevHit = cmp ? hit([{ input: prev.input_tokens, cached: prev.cached_tokens }]) : null;
+        const range = state.range, t = o.summary.totals, vs = 'vs prev ' + range;
+        // exact previous period from the API when present; otherwise the derived comparison (or none for 30d)
+        const cmp = o.summary.previous ? { cur: t, prev: o.summary.previous } : comparison(o.prevTs, range);
+        const pick = k => (cmp && cmp.cur[k] != null && cmp.prev[k] != null) ? [cmp.cur[k], cmp.prev[k]] : [null, null];
         const tiles = [
           tileHtml('Requests', fmtInt(t.requests), deltaHtml(...pick('requests'), true, vs)),
-          tileHtml('Fresh tokens', fmtCompact(t.input_tokens), deltaHtml(...pick('input_tokens'), true, vs), fmtInt(t.input_tokens) + ' uncached input tokens'),
+          tileHtml('Fresh tokens', fmtCompact(t.fresh_tokens), deltaHtml(...pick('fresh_tokens'), true, vs), fmtInt(t.fresh_tokens) + ' input tokens not served from cache'),
           tileHtml('Cached tokens', fmtCompact(t.cached_tokens), deltaHtml(...pick('cached_tokens'), true, vs), fmtInt(t.cached_tokens) + ' cached input tokens'),
           tileHtml('Output tokens', fmtCompact(t.output_tokens), deltaHtml(...pick('output_tokens'), true, vs), fmtInt(t.output_tokens) + ' output tokens'),
-          tileHtml('Cache hit', fmtPct(t.cache_hit_ratio), deltaHtml(curHit, prevHit, true, vs, true), 'cached ÷ (fresh + cached) input tokens'),
+          tileHtml('Cache hit', fmtPct(t.cache_hit_ratio), deltaHtml(...pick('cache_hit_ratio'), true, vs, true), 'cached ÷ input tokens'),
           tileHtml('Errors', fmtInt(t.errors), deltaHtml(...pick('errors'), false, vs)),
-          tileHtml('Active threads', o.summary.active_threads == null ? '—' : fmtInt(o.summary.active_threads), deltaHtml(null, null, true, vs), 'Distinct Codex threads seen in this range'),
-          tileHtml('p95 latency', fmtMs(t.latency_p95), deltaHtml(null, null, false, vs))
+          tileHtml('Active threads', o.summary.active_threads == null ? '—' : fmtInt(o.summary.active_threads), deltaHtml(...pick('active_threads'), true, vs), 'Distinct Codex threads seen in this range'),
+          tileHtml('p95 latency', fmtMs(t.latency_p95), deltaHtml(...pick('latency_p95'), false, vs))
         ].join('');
 
-        const data = charts.buildBuckets(o.rows, range, Date.now());
+        const data = charts.buildBuckets(o.ts, range, Date.now());
         const hasData = data.buckets.some(b => b.total > 0);
         const legend = '<ul class="legend" aria-label="Providers">' + SERIES.map(p => '<li>' + swatch(p) + esc(providerLabel(p)) + '</li>').join('') + '</ul>';
         let plot;
@@ -815,7 +857,9 @@ const DCR = (function () {
           return;
         }
         const reserve = (state.settings && state.settings.reserve) || {};
-        const reserveModel = reserve.model || (state.health && state.health.reserve_model) || '';
+        // `effective` is what actually answers reserve turns; `model` is null until a default is set explicitly
+        const reserveModel = reserve.effective || reserve.model || (state.health && state.health.reserve_model) || '';
+        const reserveNote = reserveModel && !reserve.model ? ' <span class="hint">(router default — not set explicitly)</span>' : '';
         const list = state.models || [];
         const groups = MODEL_GROUPS.map(([prov, title]) => {
           const items = list.filter(x => String(x.provider || '').toLowerCase() === prov);
@@ -831,9 +875,9 @@ const DCR = (function () {
         const threads = reserve.threads && typeof reserve.threads === 'object' ? Object.keys(reserve.threads) : [];
         const threadRows = threads.map(th => '<tr><td><code title="' + esc(th) + '">' + esc(shortId(th)) + '</code></td><td>' + esc(modelDisplay(reserve.threads[th])) + ' <span class="sub"><code>' + esc(reserve.threads[th]) + '</code></span></td>' +
           '<td class="num"><button type="button" class="btn btn-danger btn-sm" data-action="delete-thread" data-thread="' + esc(th) + '" aria-label="Remove override for thread ' + esc(shortId(th)) + '">Delete</button></td></tr>').join('');
-        const reserveCard = '<section class="card" aria-labelledby="reserve-title" id="reserve"><div class="card-head"><div><p class="eyebrow">Reserve routing</p><h2 id="reserve-title">Codex reserve turns</h2></div></div>' +
+        const reserveCard = '<section class="card" aria-labelledby="reserve-title" id="reserve"><div class="card-head"><div><p class="eyebrow">Reserve routing</p><h2 id="reserve-title" tabindex="-1">Codex reserve turns</h2></div></div>' +
           '<p class="lead">When Codex desktop is in reserve mode it sends every turn as <code>gpt-reserve</code>; the router answers those turns with the default below — or a per-thread override — through your own subscription.</p>' +
-          '<div class="kv" style="margin:12px 0 16px"><span class="label">Default</span><span><strong>' + esc(reserveModel ? modelDisplay(reserveModel) : 'Router default') + '</strong>' + (reserveModel ? ' <code>' + esc(reserveModel) + '</code>' : '') + '</span></div>' +
+          '<div class="kv" style="margin:12px 0 16px"><span class="label">Default</span><span><strong>' + esc(reserveModel ? modelDisplay(reserveModel) : 'Router default') + '</strong>' + (reserveModel ? ' <code>' + esc(reserveModel) + '</code>' : '') + reserveNote + '</span></div>' +
           '<h3 style="margin-bottom:8px">Per-thread overrides</h3>' +
           (threadRows ? '<div class="table-scroll"><table class="table"><caption class="sr-only">Threads whose reserve turns use a different model</caption><thead><tr><th scope="col">Thread</th><th scope="col">Model</th><th scope="col" class="num"><span class="sr-only">Actions</span></th></tr></thead><tbody>' + threadRows + '</tbody></table></div>'
             : emptyHtml('No per-thread overrides', 'Every reserve turn uses the default. Overrides are set from inside a Codex chat and appear here.')) + '</section>';
@@ -896,12 +940,16 @@ const DCR = (function () {
       const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
       if (r.provider) params.set('provider', r.provider);
       if (r.status) params.set('status', r.status);
-      if (more && r.rows.length) params.set('before', String(r.rows[r.rows.length - 1].id));
+      if (more && r.next != null) params.set('before', String(r.next));
       try {
-        const data = listOf(await api.get('/requests?' + params.toString()), REQ_KEYS);
+        const payload = await api.get('/requests?' + params.toString());
+        const data = listOf(payload, REQ_KEYS);
         if (state.mode !== 'app') return;
         r.rows = more ? r.rows.concat(data) : data;
-        r.done = data.length < PAGE_SIZE;
+        // cursor: the API's next_before when it sends one, else the last id while pages come back full
+        r.next = payload && !Array.isArray(payload) && payload.next_before !== undefined ? payload.next_before
+          : (data.length === PAGE_SIZE ? data[data.length - 1].id : null);
+        r.done = r.next == null;
         r.error = null;
         r.loaded = true;
       } catch (e) {
@@ -964,7 +1012,7 @@ const DCR = (function () {
         }).join('');
         body.innerHTML = '<div class="table-scroll"><table class="table"><caption class="sr-only">Request log, newest first</caption><thead><tr>' +
           '<th scope="col">Time</th><th scope="col">Provider</th><th scope="col">Model</th><th scope="col">Kind</th><th scope="col">Status</th><th scope="col" class="num">Latency</th>' +
-          '<th scope="col" class="num" title="Fresh input tokens">In</th><th scope="col" class="num" title="Cached input tokens">Cached</th><th scope="col" class="num" title="Output tokens">Out</th>' +
+          '<th scope="col" class="num" title="Input tokens (includes cached)">Input</th><th scope="col" class="num" title="Cached input tokens">Cached</th><th scope="col" class="num" title="Output tokens">Output</th>' +
           '<th scope="col" class="num" title="Session resumed">Resumed</th><th scope="col" class="num" title="Tool calls">Tools</th><th scope="col">Thread</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
         foot.innerHTML = r.done
           ? '<span class="hint" id="req-end" tabindex="-1">End of history · ' + fmtInt(r.rows.length) + ' shown</span>'
@@ -986,7 +1034,7 @@ const DCR = (function () {
       if (action === 'more') { el.disabled = true; el.textContent = 'Loading…'; this.load({ more: true, force: true }); }
       else if (action === 'reload') { r.expanded.clear(); this.load({ force: true }); }
       else if (action === 'clear-filters') { r.provider = ''; r.status = ''; $('#req-frame') && $('#req-frame').remove(); this.paint(true); this.load({ force: true }); }
-      else if (action === 'toggle-error') { this.toggle(el.dataset.id); refocus(null); const b = $('.disclose[data-id="' + CSS.escape(el.dataset.id) + '"]'); if (b) b.focus(); }
+      else if (action === 'toggle-error') this.toggle(el.dataset.id);   // in-place DOM toggle, focus stays on the button
     },
     toggle(id) {
       const r = state.requests;
@@ -1014,7 +1062,7 @@ const DCR = (function () {
       if (state.mode !== 'app') return;
       if (h.status === 'fulfilled') { state.health = h.value; state.healthError = null; paintHealth(); }
       if (us.status === 'fulfilled') {
-        u.windows = listOf(us.value, WINDOW_KEYS);
+        u.windows = normWindows(us.value);
         u.counts = (us.value && us.value.counts && typeof us.value.counts === 'object') ? us.value.counts
           : (state.health && state.health.counts) || null;
         u.error = null; u.loaded = true;
@@ -1111,7 +1159,7 @@ const DCR = (function () {
           tokenBody = '<div class="row"><p class="lead">Generates a new token, writes it to <code>state/dashboard-token</code> and signs out every other session.</p>' +
             '<button type="button" class="btn btn-ghost" data-action="rotate" id="rotate-btn">Rotate dashboard token</button></div>';
         }
-        const tokenCard = '<section class="card" aria-labelledby="token-title"><div class="card-head"><div><p class="eyebrow">Access</p><h2 id="token-title">Dashboard token</h2></div></div>' + tokenBody + '</section>';
+        const tokenCard = '<section class="card" aria-labelledby="token-title"><div class="card-head"><div><p class="eyebrow">Access</p><h2 id="token-title" tabindex="-1">Dashboard token</h2></div></div>' + tokenBody + '</section>';
 
         const catalogPath = state.settings && state.settings.catalog_path ? String(state.settings.catalog_path) : '';
         const catalogCard = '<section class="card" aria-labelledby="catalog-title"><div class="card-head"><div><p class="eyebrow">Codex</p><h2 id="catalog-title">Model catalog</h2></div></div>' +
@@ -1121,7 +1169,10 @@ const DCR = (function () {
         const sessionCard = '<section class="card" aria-labelledby="session-title"><div class="card-head"><div><p class="eyebrow">Session</p><h2 id="session-title">Sign out</h2></div></div>' +
           '<div class="row"><p class="lead">Clears the dashboard cookie on this browser. The token itself stays valid.</p><button type="button" class="btn btn-ghost" data-action="logout">Sign out</button></div></section>';
 
-        root.innerHTML = themeCard + tokenCard + (s.loaded || s.error ? ollamaPanelHtml('settings-ollama') : '<div class="card">' + skel('sk-line w-40') + skel('sk-line') + '</div>') + catalogCard + sessionCard;
+        const ollamaCard = s.loaded ? ollamaPanelHtml('settings-ollama')
+          : (s.error ? '<section class="card" aria-label="Ollama">' + errorHtml(s.error) + '</section>'
+            : '<div class="card">' + skel('sk-line w-40') + skel('sk-line') + '</div>');
+        root.innerHTML = themeCard + tokenCard + ollamaCard + catalogCard + sessionCard;
       };
       if (force) draw(); else paintWhenIdle(root, draw);
     },
@@ -1175,7 +1226,11 @@ const DCR = (function () {
     const parts = ['curl -s'];
     if (e.m !== 'GET') parts.push('-X ' + e.m);
     if (e.auth) parts.push('-H "Authorization: Bearer $DCR_TOKEN"');
-    if (e.body) parts.push('-H "Content-Type: application/json"', "-d '" + JSON.stringify(e.body) + "'");
+    if (e.body) {
+      const json = JSON.stringify(e.body);
+      // a body that references $DCR_TOKEN must be double-quoted so the shell expands it
+      parts.push('-H "Content-Type: application/json"', json.includes('$DCR_TOKEN') ? '-d "' + json.replace(/"/g, '\\"') + '"' : "-d '" + json + "'");
+    }
     if (e.cookie) parts.push('-c cookies.txt');
     parts.push('"' + url + '"');
     return parts.join(' \\\n  ');
@@ -1278,8 +1333,8 @@ const DCR = (function () {
     setMode('login');
     // forget everything from the previous session
     state.models = null; state.settings = null; state.ollamaDiscovered = null;
-    state.overview = { loaded: false, loading: false, error: null, summary: null, rows: [], prevRows: null, recent: [], mode: 'chart' };
-    state.requests = { loaded: false, loading: false, error: null, rows: [], provider: '', status: '', done: false, expanded: new Set() };
+    state.overview = { loaded: false, loading: false, error: null, summary: null, ts: null, prevTs: null, recent: [], mode: 'chart' };
+    state.requests = { loaded: false, loading: false, error: null, rows: [], next: null, provider: '', status: '', done: false, expanded: new Set() };
     state.models_ = { loaded: false, loading: false, error: null };
     state.usage = { loaded: false, loading: false, error: null, windows: [], counts: null };
     state.settings_ = { loaded: false, loading: false, error: null, rotatedToken: null, confirmRotate: false };
@@ -1296,6 +1351,8 @@ const DCR = (function () {
     applyTheme();
     $$('input[name="range"]').forEach(r => { r.checked = r.value === state.range; });
     loadHealth(true);
+    // one-time catalog fetch so the reserve chip can show a display name instead of a slug
+    api.get('/models').then(m => { state.models = listOf(m, MODEL_KEYS); paintHealth(); }).catch(() => { /* view loads report their own errors */ });
     if (!location.hash) history.replaceState(null, '', '#/overview');
     navigate();
     startTimer();

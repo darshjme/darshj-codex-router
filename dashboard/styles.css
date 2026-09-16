@@ -228,12 +228,14 @@ ul { margin: 0; padding: 0; }
 
 .content { padding: 28px 32px 48px; width: 100%; max-width: 1320px; }
 .content:focus { outline: none; }
+.content * { scroll-margin-top: 84px; }   /* keep focused controls clear of the sticky top bar */
 .view { display: flex; flex-direction: column; gap: 20px; }
 .view.is-loading > * { opacity: 0.6; transition: opacity 0.15s; }
 .grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
 
 /* ------------------------------------------------------------------ primitives */
 .card {
+  position: relative;
   background: var(--card); border: 1px solid var(--line); border-radius: var(--r-card);
   padding: 20px; box-shadow: var(--shadow);
 }
@@ -360,7 +362,7 @@ a.chip:hover { background: var(--hover); }
 .token-box .codeblock pre { font-size: 14px; word-break: break-all; white-space: pre-wrap; }
 
 /* stat tiles */
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
 .tile {
   display: flex; flex-direction: column; gap: 6px; padding: 16px 18px;
   background: var(--card); border: 1px solid var(--line); border-radius: var(--r-card);
@@ -403,7 +405,9 @@ a.chip:hover { background: var(--hover); }
 .chart-empty { min-height: 240px; display: grid; place-items: center; }
 
 /* tables */
-.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
+/* position: relative makes the scroller the containing block for .sr-only text inside cells,
+   so visually-hidden text scrolls with the table instead of widening the page */
+.table-scroll { position: relative; overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
 .table-scroll.tall { max-height: 360px; overflow-y: auto; }
 .table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .table caption { text-align: left; padding: 0 0 8px; font: 600 12px var(--font-ui); color: var(--text-2); }
@@ -572,7 +576,7 @@ a.chip:hover { background: var(--hover); }
     position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px 12px;
     padding: 10px 16px; border-right: 0; border-bottom: 1px solid var(--line);
   }
-  .nav { margin: 0; order: 3; flex: 1 1 100%; overflow-x: auto; }
+  .nav { margin: 0; order: 3; flex: 1 1 100%; min-width: 0; overflow-x: auto; }
   .nav ul { flex-direction: row; gap: 4px; }
   .nav a { white-space: nowrap; padding: 8px 12px; }
   .nav a[aria-current="page"]::before { left: 10px; right: 10px; top: auto; bottom: 0; width: auto; height: 3px; }
