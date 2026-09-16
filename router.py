@@ -22,7 +22,7 @@ try:
     import dashboard_api
 except ImportError:  # pragma: no cover
     stats_module = dashboard_api = None
-from adapter import MODELS, GROK_MODELS, CLAUDE_MODELS, BridgeError, PreviousResponseLost, run_claude, run_grok, response_events, CHECKPOINT_PREFIX, uid
+from adapter import MODELS, GROK_MODELS, CLAUDE_MODELS, BridgeError, PreviousResponseLost, run_claude, run_grok, response_events, CHECKPOINT_PREFIX, uid, bound_tool_outputs, IMAGE_TYPES
 import base64
 
 UPSTREAM = 'https://chatgpt.com/backend-api/codex'
@@ -35,6 +35,34 @@ PASSTHROUGH_PATHS = ('/live', '/realtime', '/alpha/search')
 # Models asked, in order, to render an OpenAI-encrypted checkpoint readable
 # for Claude. Only OpenAI can decrypt its own compaction state.
 CHECKPOINT_MODELS = ('gpt-6-astra', 'gpt-5.5')
+
+def strip_checkpoint_images(material):
+    """Replace image parts in checkpoint material with numbered '[image N]' text
+    placeholders so no base64 data is serialized into the compaction summary prompt.
+    A summary cannot use pixels, and one image-heavy thread would otherwise inline
+    megabytes into a single user message."""
+    counter = [0]
+    def placeholder():
+        counter[0] += 1
+        return {'type': 'input_text', 'text': '[image %d]' % counter[0]}
+    def is_image_part(obj):
+        if obj.get('type') in IMAGE_TYPES or obj.get('type') == 'image_url':
+            return True
+        url = obj.get('image_url')
+        if isinstance(url, dict):
+            url = url.get('url')
+        return isinstance(url, str) and url.startswith('data:')
+    def walk(obj):
+        if isinstance(obj, dict):
+            if is_image_part(obj):
+                return placeholder()
+            return {k: walk(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [walk(v) for v in obj]
+        if isinstance(obj, str) and obj.startswith('data:image/'):
+            return placeholder()['text']
+        return obj
+    return walk(material)
 CHECKPOINT_PROMPT = ('Write a handoff summary of the conversation so far for a successor assistant. '
     'Preserve the user objective, constraints, actual completed work, exact relevant paths, '
     'test outcomes, failures, open questions, and next actions. Separate historical '
@@ -612,7 +640,10 @@ class Router:
         compact = any(x.get('type') == 'compaction_trigger' for x in request.get('input', []))
         inference = request
         if compact:
-            material = [x for x in request.get('input', []) if x.get('type') not in ('additional_tools', 'compaction_trigger', 'reasoning')]
+            # Checkpoint material gets the same tool-output caps as a normal send,
+            # and image parts become placeholders (no base64 in the summary prompt).
+            material = strip_checkpoint_images(bound_tool_outputs(
+                [x for x in request.get('input', []) if x.get('type') not in ('additional_tools', 'compaction_trigger', 'reasoning')]))
             inference = {'model': request['model'], 'input': [{'type': 'message', 'role': 'user', 'content':
                 'Summarize this conversation for a successor assistant. Preserve the user objective, '
                 'constraints, actual completed work, exact relevant paths, test outcomes, failures, '

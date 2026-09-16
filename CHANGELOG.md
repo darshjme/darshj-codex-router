@@ -1,5 +1,37 @@
 # Changes
 
+## 2026-09-16 (token diet)
+
+### Changed
+
+- Tool outputs are bounded at the bridge: each `function_call_output` /
+  `custom_tool_call_output` keeps its first 24 KiB and last 8 KiB with a
+  `[bridge truncated N bytes]` marker, and one send carries at most 96 KiB of
+  tool output (checkpoint material included). This is a defensive bound rather
+  than a large saving: the 1 MB outputs seen on 2026-09-15 were image parts that
+  `extract_images()` already turns into `[image N]` placeholders; text outputs
+  in that session cost about 35k tokens, which the cap now removes, and Grok no
+  longer re-pays outputs above 32 KiB on every turn.
+- Checkpoint (compaction) material has image parts replaced with `[image N]`
+  placeholders before it is serialized into the summary prompt, so no base64
+  data rides into a compaction turn.
+- Grok threads receive Codex's built-in prompt without the sections that only
+  concern Codex's own model or host UI (approval mechanics, personality,
+  technical-communication and PR-description guidance, visualizations,
+  skill/app/plugin plumbing). Measured on real rollouts: the grok-max base
+  prompt drops 20,919 -> 12,937 chars (-38%); the gpt-reserve prompt variant
+  (used when a thread switches to grok-max mid-session) drops 17,730 -> 15,177
+  chars, headings matched case-insensitively. Paid on every Grok turn; Claude
+  keeps the full text as a one-time cache write so its cache prefix is
+  unchanged.
+- The Grok system preamble now points at the memory-bus for durable user memory
+  (bridged headless sessions load no `~/.grok` rules files).
+- Catalog: `grok-max` advertises a 160k context window so Codex compacts
+  earlier; `gpt-6-astra`, `gpt-reserve`, `claude-max-*` and `grok-max` carry
+  `auto_compact_token_limit: 110000` (matching the global ceiling in
+  `~/.codex/config.toml`); the `service_tiers` array copied from the Astra
+  entry is removed from the `claude-max-*` and `grok-max` entries.
+
 ## 1.0.0 — 2026-09-16 (rebrand + dashboard)
 
 First tagged release, renamed from Codex Max Router to Darshj's Codex Router.

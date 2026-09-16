@@ -109,6 +109,7 @@
       "supports_image_detail_original": true,
       "context_window": 272000,
       "max_context_window": 872000,
+      "auto_compact_token_limit": 110000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [
@@ -204,6 +205,7 @@
       "supports_image_detail_original": true,
       "context_window": 272000,
       "max_context_window": 872000,
+      "auto_compact_token_limit": 110000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [],
@@ -705,13 +707,6 @@
       "supported_in_api": true,
       "priority": 5,
       "additional_speed_tiers": [],
-      "service_tiers": [
-        {
-          "id": "priority",
-          "name": "Fast",
-          "description": "2x speed, increased usage"
-        }
-      ],
       "availability_nux": null,
       "upgrade": null,
       "model_messages": {
@@ -774,6 +769,7 @@
       "supports_image_detail_original": true,
       "context_window": 200000,
       "max_context_window": 200000,
+      "auto_compact_token_limit": 110000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [
@@ -825,13 +821,6 @@
       "supported_in_api": true,
       "priority": 6,
       "additional_speed_tiers": [],
-      "service_tiers": [
-        {
-          "id": "priority",
-          "name": "Fast",
-          "description": "2x speed, increased usage"
-        }
-      ],
       "availability_nux": null,
       "upgrade": null,
       "model_messages": {
@@ -894,6 +883,7 @@
       "supports_image_detail_original": true,
       "context_window": 200000,
       "max_context_window": 200000,
+      "auto_compact_token_limit": 110000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [
@@ -945,13 +935,6 @@
       "supported_in_api": true,
       "priority": 9,
       "additional_speed_tiers": [],
-      "service_tiers": [
-        {
-          "id": "priority",
-          "name": "Fast",
-          "description": "2x speed, increased usage"
-        }
-      ],
       "availability_nux": null,
       "upgrade": null,
       "model_messages": {
@@ -1014,6 +997,7 @@
       "supports_image_detail_original": true,
       "context_window": 200000,
       "max_context_window": 200000,
+      "auto_compact_token_limit": 110000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [
@@ -1065,13 +1049,6 @@
       "supported_in_api": true,
       "priority": 10,
       "additional_speed_tiers": [],
-      "service_tiers": [
-        {
-          "id": "priority",
-          "name": "Fast",
-          "description": "2x speed, increased usage"
-        }
-      ],
       "availability_nux": null,
       "upgrade": null,
       "model_messages": {
@@ -1134,6 +1111,7 @@
       "supports_image_detail_original": true,
       "context_window": 200000,
       "max_context_window": 200000,
+      "auto_compact_token_limit": 110000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [
@@ -1185,13 +1163,6 @@
       "supported_in_api": true,
       "priority": 2,
       "additional_speed_tiers": [],
-      "service_tiers": [
-        {
-          "id": "priority",
-          "name": "Fast",
-          "description": "2x speed, increased usage"
-        }
-      ],
       "availability_nux": null,
       "upgrade": null,
       "model_messages": {
@@ -1252,8 +1223,9 @@
         "limit": 10000
       },
       "supports_image_detail_original": true,
-      "context_window": 200000,
-      "max_context_window": 200000,
+      "context_window": 160000,
+      "max_context_window": 160000,
+      "auto_compact_token_limit": 110000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [

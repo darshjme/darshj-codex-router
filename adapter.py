@@ -147,10 +147,104 @@ def extract_images(obj, images):
         return [extract_images(v, images) for v in obj]
     return obj
 
-def translate(request, agent='Claude', host='Claude Code', search_tools='WebSearch and WebFetch', delta=None):
+# --- Bridge-side tool-output guard -----------------------------------------
+# Codex's catalog truncation_policy bounds tool output for its own models, but
+# exec/custom outputs reaching the bridge have exceeded 1 MB in practice. Each
+# rendered tool output keeps its head and tail, and the sum per send is capped
+# so one burst of large results cannot fill the bridged model's window.
+OUTPUT_TYPES = ('function_call_output', 'custom_tool_call_output')
+OUTPUT_HEAD = 24 * 1024
+OUTPUT_TAIL = 8 * 1024
+OUTPUT_LIMIT = OUTPUT_HEAD + OUTPUT_TAIL   # 32 KiB per tool output
+OUTPUT_FLOOR = 1024                        # never less than this per output
+TURN_OUTPUT_BUDGET = 96 * 1024             # all tool outputs in one send
+TRUNCATION_MARK = '\n[bridge truncated %d bytes]\n'
+
+def truncate_output(text, limit):
+    """Keep the head (3/4) and tail (1/4) of `limit` bytes of `text`, UTF-8 safe."""
+    data = text.encode('utf-8')
+    if len(data) <= limit:
+        return text
+    head = min(OUTPUT_HEAD, limit * 3 // 4)
+    tail = min(OUTPUT_TAIL, limit - head)
+    return (data[:head].decode('utf-8', 'ignore') + TRUNCATION_MARK % (len(data) - head - tail)
+            + data[len(data) - tail:].decode('utf-8', 'ignore'))
+
+def bound_tool_outputs(items, budget=TURN_OUTPUT_BUDGET):
+    """Apply the per-output and per-send caps to tool outputs in `items`.
+    Text parts of list-shaped outputs are cut; image parts pass through."""
+    remaining = budget
+    result = []
+    for item in items:
+        if isinstance(item, dict) and item.get('type') in OUTPUT_TYPES:
+            allowed = max(min(OUTPUT_LIMIT, remaining), OUTPUT_FLOOR)
+            output = item.get('output')
+            if isinstance(output, str):
+                bounded = truncate_output(output, allowed)
+                remaining -= len(bounded.encode('utf-8'))
+                if bounded is not output:
+                    item = dict(item, output=bounded)
+            elif isinstance(output, list):
+                parts = []
+                for part in output:
+                    if isinstance(part, dict) and isinstance(part.get('text'), str):
+                        text = truncate_output(part['text'], max(allowed, OUTPUT_FLOOR))
+                        allowed -= len(text.encode('utf-8'))
+                        remaining -= len(text.encode('utf-8'))
+                        if text is not part['text']:
+                            part = dict(part, text=text)
+                    parts.append(part)
+                item = dict(item, output=parts)
+            remaining = max(remaining, 0)
+        result.append(item)
+    return result
+
+# --- Grok fixed-prefix trim --------------------------------------------------
+# Codex prepends its built-in prompt as the thread's first developer message
+# (it does not use the request's `instructions` field). Grok CLI re-sends its
+# whole transcript every turn with no reliable cache discount, so sections that
+# only concern Codex's own model or host UI are dropped on that path. Claude
+# keeps the full text: it is one cache write per session, then cache reads.
+CODEX_BASE_MARK = 'You are Codex, an agent based on'
+SECTION_RE = re.compile(r'(?m)^(?=#{1,3} )')
+# Heading text is compared case-insensitively: Codex's per-model prompt variants
+# differ in heading case (e.g. "## Technical communication" vs "... Communication").
+GROK_DROPPED_SECTIONS = frozenset(s.lower() for s in (
+    '# When to ask the user for permission',   # approval / auto-review mechanics
+    '# Personality',
+    '## Technical Communication',
+    '### Writing PR descriptions',
+    '### Visualizations',                      # Codex desktop inline visuals
+    '## How to use skills',                    # skills.list / skills.read plumbing
+    '# Apps (Connectors)',
+    '# Plugins',
+    '## How to use plugins',
+))
+
+def trim_base_instructions(text):
+    """Drop GROK_DROPPED_SECTIONS from Codex's built-in prompt; other text is returned as is."""
+    if not text.startswith(CODEX_BASE_MARK):
+        return text
+    return ''.join(s for s in SECTION_RE.split(text)
+                   if s.split('\n', 1)[0].rstrip().lower() not in GROK_DROPPED_SECTIONS)
+
+def trim_developer_message(item, trim):
+    if not (isinstance(item, dict) and item.get('type', 'message') == 'message'
+            and item.get('role') == 'developer'):
+        return item
+    content = item.get('content')
+    if isinstance(content, str):
+        return dict(item, content=trim(content))
+    if isinstance(content, list):
+        return dict(item, content=[dict(p, text=trim(p['text'])) if isinstance(p, dict)
+                                   and isinstance(p.get('text'), str) else p for p in content])
+    return item
+
+def translate(request, agent='Claude', host='Claude Code', search_tools='WebSearch and WebFetch', delta=None, trim=None):
     """Build the bridge prompt. With `delta`, only those new items are rendered
     as the conversation (the rest already lives in the resumed Claude Code
-    session); tool declarations are still gathered from the whole thread."""
+    session); tool declarations are still gathered from the whole thread.
+    `trim` rewrites developer message text (Grok: trim_base_instructions)."""
     items = request.get('input', [])
     if isinstance(items, str):
         items = [{'role': 'user', 'type': 'message', 'content': items}]
@@ -194,6 +288,9 @@ def translate(request, agent='Claude', host='Claude Code', search_tools='WebSear
                 described.update(flatten_tools(item.get('tools', [])))
             elif kind != 'reasoning':
                 raise BridgeError('Unsupported continuation item: ' + kind)
+    transcript = bound_tool_outputs(transcript)
+    if trim:
+        transcript = [trim_developer_message(item, trim) for item in transcript]
     images = []
     transcript = extract_images(transcript, images)
     search = wants_search(request, items)
@@ -436,6 +533,12 @@ MIME_BY_EXT = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
                '.webm': 'video/webm', '.mov': 'video/quicktime'}
 # 4 MiB cap so a Responses event stays displayable in Codex.
 MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024
+# Bridged Grok sessions run with --system-prompt-override and load no ~/.grok rules
+# files, so the memory pointer travels in the preamble (one line, under 200 chars).
+GROK_MEMORY_SYSTEM = (
+    'Durable user memory is available via the memory-bus; if the conversation references '
+    'earlier work you do not see, say so rather than guessing.\n'
+)
 IMAGINE_SYSTEM = (
     'Image and video generation: use your native image_gen, image_edit, image_to_video, '
     'and reference_to_video tools (Grok Imagine on grok.com) directly. Do not put those '
@@ -576,13 +679,13 @@ async def run_grok(request, executable, cwd, timeout=240, session=None, resume=F
     thread continues one Grok session and only new items are sent each turn."""
     system, prompt, schema, tools, images, search = translate(
         request, agent='Grok', host='Grok CLI', search_tools='web_search and web_fetch',
-        delta=delta if resume else None)
+        delta=delta if resume else None, trim=trim_base_instructions)
     Path(cwd).mkdir(parents=True, exist_ok=True, mode=0o700)
     saved = write_input_images(images, cwd)
     if saved:
         system += 'Input images for Imagine are saved as: ' + ', '.join(
             '%s is [image %d]' % (path.name, index) for index, path in enumerate(saved, 1)) + '.\n'
-    system += IMAGINE_SYSTEM
+    system += GROK_MEMORY_SYSTEM + IMAGINE_SYSTEM
     model = GROK_MODELS.get(request.get('model'), GROK_MODELS[DEFAULT_GROK_MODEL])
     args = [executable, '--no-leader', '--output-format', 'streaming-messages-json',
             '--json-schema', json.dumps(schema), '--system-prompt-override', system,

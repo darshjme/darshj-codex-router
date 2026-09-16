@@ -97,6 +97,91 @@ class AdapterTests(unittest.TestCase):
         self.assertNotIn('rate_limit_headers', events[-1]['response'])
 
 
+    def test_tool_outputs_are_bounded_at_the_bridge(self):
+        big = 'a' * 40000 + 'Z' * 1000
+        req = {'input': [{'role': 'user', 'content': 'go'},
+                         {'type': 'function_call_output', 'call_id': 'c1', 'output': big},
+                         {'type': 'custom_tool_call_output', 'call_id': 'c2', 'output': 'small'}]}
+        _, prompt, _, _, _, _ = translate(req)
+        conv = json.loads(prompt)['conversation']
+        out = conv[1]['output']
+        self.assertLessEqual(len(out.encode()), adapter.OUTPUT_LIMIT + 64)
+        self.assertTrue(out.startswith('a' * adapter.OUTPUT_HEAD))
+        self.assertTrue(out.endswith('Z' * 1000))
+        self.assertIn('[bridge truncated %d bytes]' % (len(big) - adapter.OUTPUT_LIMIT), out)
+        self.assertEqual(conv[2]['output'], 'small')
+        # Image parts of a list-shaped output survive; only the text part is cut.
+        parts = [{'type': 'input_image', 'image_url': 'data:image/png;base64,abc'}, {'type': 'input_text', 'text': big}]
+        _, prompt, _, _, images, _ = translate({'input': [{'type': 'function_call_output', 'call_id': 'c3', 'output': parts}]})
+        out = json.loads(prompt)['conversation'][0]['output']
+        self.assertEqual(len(images), 1)
+        self.assertEqual(out[0]['text'], '[image 1]')
+        self.assertIn('[bridge truncated', out[1]['text'])
+        # The per-send budget caps the sum of tool outputs; earlier ones keep priority.
+        delta = [{'type': 'function_call_output', 'call_id': 'c%d' % i, 'output': chr(65 + i) * 30000} for i in range(5)]
+        _, prompt, _, _, _, _ = translate({'input': []}, delta=delta)
+        conv = json.loads(prompt)['conversation']
+        self.assertEqual([x['output'] for x in conv[:3]], [d['output'] for d in delta[:3]])
+        self.assertTrue(all('[bridge truncated' in x['output'] for x in conv[3:]))
+        total = sum(len(x['output'].encode()) for x in conv)
+        self.assertLessEqual(total, adapter.TURN_OUTPUT_BUDGET + adapter.OUTPUT_FLOOR + 2 * 64)
+
+    def test_grok_drops_codex_only_prompt_sections(self):
+        base = ('You are Codex, an agent based on GPT-6. Shared workspace.\n\n'
+                '# When to ask the user for permission\n\napproval text\n\n'
+                '# Autonomy and persistence\n\nkeep this\n\n# Personality\n\nwarm\n\n'
+                '## Writing style\n\nplain\n\n# Plugins\n\nbundle\n\n## How to use plugins\n\nnaming\n')
+        req = {'input': [{'type': 'message', 'role': 'developer', 'content': [{'type': 'input_text', 'text': base}]},
+                         {'type': 'message', 'role': 'user', 'content': 'hi'}]}
+        _, prompt, _, _, _, _ = translate(req, trim=adapter.trim_base_instructions)
+        text = json.loads(prompt)['conversation'][0]['content'][0]['text']
+        self.assertTrue(text.startswith('You are Codex, an agent based on GPT-6. Shared workspace.'))
+        self.assertIn('# Autonomy and persistence\n\nkeep this', text)
+        self.assertIn('## Writing style\n\nplain', text)
+        for gone in ('# When to ask the user for permission', 'approval text', '# Personality', 'warm', '# Plugins', 'naming'):
+            self.assertNotIn(gone, text)
+        # Claude keeps the full prompt (one cache write per session); other developer text is untouched.
+        _, prompt, _, _, _, _ = translate(req)
+        self.assertIn('# Personality', json.loads(prompt)['conversation'][0]['content'][0]['text'])
+        self.assertEqual(adapter.trim_base_instructions('# Personality\nother developer note'), '# Personality\nother developer note')
+
+    def test_grok_trim_matches_headings_case_insensitively(self):
+        # Codex's per-model prompt variants differ in heading case (gpt-reserve base
+        # prompt: "## Technical communication"); the trim must still catch them.
+        base = ('You are Codex, an agent based on GPT-6.\n\n# personality\n\nwarm\n\n'
+                '## Writing style\n\nplain\n\n## Technical communication\n\nlead with outcome\n\n'
+                '# Working with the user\n\nkeep\n')
+        text = adapter.trim_base_instructions(base)
+        self.assertNotIn('warm', text)
+        self.assertNotIn('lead with outcome', text)
+        self.assertIn('## Writing style\n\nplain', text)
+        self.assertIn('# Working with the user\n\nkeep', text)
+
+    def test_checkpoint_images_become_placeholders(self):
+        data = 'data:image/png;base64,' + 'A' * 5000
+        material = [{'type': 'message', 'role': 'user', 'content': [
+                        {'type': 'input_text', 'text': 'look'},
+                        {'type': 'input_image', 'image_url': data}]},
+                    {'type': 'function_call_output', 'call_id': 'c1', 'output': [
+                        {'type': 'input_image', 'image_url': {'url': data, 'detail': 'high'}},
+                        {'type': 'input_text', 'text': 'done'}]},
+                    {'type': 'message', 'role': 'user', 'content': [{'type': 'image_url', 'image_url': {'url': data}}]},
+                    {'type': 'message', 'role': 'user', 'content': data}]
+        stripped = router.strip_checkpoint_images(material)
+        text = json.dumps(stripped)
+        self.assertNotIn('base64', text)
+        self.assertNotIn('AAAA', text)
+        self.assertEqual(stripped[0]['content'][0], {'type': 'input_text', 'text': 'look'})
+        self.assertEqual(stripped[0]['content'][1], {'type': 'input_text', 'text': '[image 1]'})
+        self.assertEqual(stripped[1]['output'][0], {'type': 'input_text', 'text': '[image 2]'})
+        self.assertEqual(stripped[1]['output'][1], {'type': 'input_text', 'text': 'done'})
+        self.assertEqual(stripped[2]['content'][0], {'type': 'input_text', 'text': '[image 3]'})
+        self.assertEqual(stripped[3]['content'], '[image 4]')
+        self.assertLess(len(text), 1000)
+        # The original material is not mutated.
+        self.assertIn('AAAA', json.dumps(material))
+
+
 class ClaudeInvocationTests(unittest.IsolatedAsyncioTestCase):
     async def invoke(self, request):
         captured = {}
@@ -453,6 +538,24 @@ class GrokInvocationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data['message'], 'from-text')
 
 
+    async def test_grok_receives_trimmed_codex_prompt(self):
+        base = 'You are Codex, an agent based on GPT-6.\n\n# Personality\n\nwarm\n\n# Autonomy and persistence\n\nkeep\n'
+        req = {'model': 'grok-max', 'input': [{'type': 'message', 'role': 'developer', 'content': base},
+                                              {'type': 'message', 'role': 'user', 'content': 'hi'}]}
+        captured, _ = await self.invoke(req)
+        text = json.loads(captured['prompt'])['conversation'][0]['content']
+        self.assertNotIn('# Personality', text)
+        self.assertIn('# Autonomy and persistence', text)
+
+    async def test_grok_preamble_points_at_memory_bus(self):
+        captured, _ = await self.invoke({'model': 'grok-max', 'input': [{'type': 'message', 'role': 'user', 'content': 'hi'}]})
+        args = captured['args']
+        system = args[args.index('--system-prompt-override') + 1]
+        self.assertIn('Durable user memory is available via the memory-bus', system)
+        self.assertLess(len(adapter.GROK_MEMORY_SYSTEM), 200)
+        self.assertLess(system.index('memory-bus'), system.index('Image and video generation'))
+
+
 class RouterTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -547,6 +650,24 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
         _, prompt, _, _, _, _ = translate({'input': response['output']})
         self.assertIn('OK', json.loads(prompt)['conversation'][0]['content'])
         self.assertEqual(list(response_events(response))[-1]['type'], 'response.completed')
+
+    async def test_compaction_prompt_carries_no_image_data(self):
+        seen = []
+        async def fake(req, *args):
+            seen.append(req)
+            return result()
+        data = 'data:image/png;base64,' + 'B' * 20000
+        with patch('router.run_claude', fake):
+            await self.app['router'].claude_response({'model': 'claude-max-sonnet', 'input': [
+                {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'see'},
+                                                                {'type': 'input_image', 'image_url': data}]},
+                {'type': 'function_call_output', 'call_id': 'c1', 'output': [{'type': 'input_image', 'image_url': data}]},
+                {'type': 'compaction_trigger'}]})
+        summary_request = json.dumps(seen[-1])
+        self.assertIn('Summarize this conversation', summary_request)
+        self.assertNotIn('BBBB', summary_request)
+        self.assertIn('[image 1]', summary_request)
+        self.assertIn('[image 2]', summary_request)
 
     async def run_upstream_case(self, code, partial=False):
         async def upstream_handler(req):
