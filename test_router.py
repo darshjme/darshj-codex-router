@@ -48,7 +48,7 @@ class AdapterTests(unittest.TestCase):
             self.assertFalse(router.is_quota({'error': {'code': code}}))
 
     def test_catalog_slugs_are_pinned_model_names(self):
-        catalog = json.loads((Path(__file__).parent / 'models.json').read_text())
+        catalog = json.loads((Path(__file__).parent / 'models.base.json').read_text())
         claude = {m['slug'] for m in catalog['models'] if m['slug'].startswith('claude-max-')}
         grok = {m['slug'] for m in catalog['models'] if m['slug'].startswith('grok-')}
         self.assertEqual(claude, set(CLAUDE_MODELS))
@@ -61,7 +61,7 @@ class AdapterTests(unittest.TestCase):
                 self.assertIn(entry['default_reasoning_level'], efforts)
 
     def test_catalog_parity_with_astra(self):
-        catalog = json.loads((Path(__file__).parent / 'models.json').read_text())
+        catalog = json.loads((Path(__file__).parent / 'models.base.json').read_text())
         astra = next(m for m in catalog['models'] if m['slug'] == 'gpt-6-astra')
         for entry in catalog['models']:
             if entry['slug'] in MODELS:
