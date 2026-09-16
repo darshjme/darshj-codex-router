@@ -234,6 +234,7 @@ class Router:
         self.grok_cwd.mkdir(exist_ok=True, mode=0o700)
         self.reserve_file = self.state / 'reserve.json'
         self.settings_file = self.state / 'settings.json'
+        self.sessions_file = self.state / 'sessions.json'
         self.token_path = self.state / 'dashboard-token'
         self.codex_config = Path.home() / '.codex/config.toml'
         self.reserve = self.load_reserve()
@@ -243,9 +244,9 @@ class Router:
         self.stats = None
         self.history = collections.OrderedDict()
         self.checkpoints = collections.OrderedDict()
-        # response id -> (Claude Code session id, model): lets the next turn of
-        # the same Codex thread resume that session and send only new items.
-        self.sessions = collections.OrderedDict()
+        # response id -> (CLI session id, model). Survives router restarts via
+        # sessions.json so grok-max / Claude threads keep one CLI session.
+        self.sessions = self.load_sessions()
         # Sized for Codex sub-agent fan-out: several agents share this bridge.
         self.semaphore = asyncio.Semaphore(4)
         self.counts = {'claude': 0, 'grok': 0, 'ollama': 0, 'openai': 0, 'fallback': 0, 'errors': 0}
@@ -348,6 +349,39 @@ class Router:
         tmp.write_text(json.dumps(self.reserve))
         tmp.replace(self.reserve_file)
 
+    def load_sessions(self):
+        """Restore CLI session ids written by a previous router process."""
+        try:
+            data = json.loads(self.sessions_file.read_text())
+        except (OSError, ValueError):
+            return collections.OrderedDict()
+        out = collections.OrderedDict()
+        if not isinstance(data, dict):
+            return out
+        for key, value in list(data.items())[-256:]:
+            if not isinstance(key, str) or not isinstance(value, (list, tuple)) or len(value) != 2:
+                continue
+            session, model = value
+            if isinstance(session, str) and session and isinstance(model, str) and model in MODELS:
+                out[key] = (session, model)
+        return out
+
+    def save_sessions(self):
+        try:
+            tmp = self.sessions_file.with_suffix('.tmp')
+            tmp.write_text(json.dumps({k: list(v) for k, v in self.sessions.items()}))
+            tmp.replace(self.sessions_file)
+        except OSError:
+            pass
+
+    def bind_session(self, response_id, session, model):
+        if not response_id or not session:
+            return
+        self.sessions[response_id] = (session, model)
+        while len(self.sessions) > 256:
+            self.sessions.popitem(last=False)
+        self.save_sessions()
+
     def set_reserve_model(self, model, thread=None):
         if model not in MODELS:
             raise ValueError('not a bridged model: %s' % model)
@@ -427,7 +461,7 @@ class Router:
         self.remember(expanded, direct)
         saved = self.sessions.get(previous) if previous else None
         if saved and saved[1] == target:
-            self.sessions[direct['id']] = saved
+            self.bind_session(direct['id'], saved[0], saved[1])
 
     def finish_reserve(self, response, notice):
         """Report the slug Codex asked for; add the first-turn notice."""
@@ -462,8 +496,11 @@ class Router:
         grok_dir = Path.home() / '.grok/sessions' / urllib.parse.quote(str(self.grok_cwd.resolve()), safe='')
         entries = list(claude_dir.glob('*.jsonl')) if claude_dir.is_dir() else []
         entries += [d for d in grok_dir.iterdir() if d.is_dir()] if grok_dir.is_dir() else []
+        live = {saved[0] for saved in self.sessions.values()}
         for entry in entries:
             try:
+                if entry.is_dir() and entry.name in live:
+                    continue
                 if entry.stat().st_mtime < cutoff:
                     shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
                     removed += 1
@@ -509,6 +546,8 @@ class Router:
             if old_id in table:
                 table[new_id] = table.pop(old_id)
         response['id'] = new_id
+        if new_id in self.sessions:
+            self.save_sessions()
 
     def expand(self, request):
         request = dict(request)
@@ -591,9 +630,14 @@ class Router:
                 else:
                     raise BridgeError('fresh')
             except BridgeError as error:
-                # A lost or corrupt session falls back to a full send in a new one.
+                # A lost or corrupt session falls back to a full send in a new one
+                # when this process still has the expanded thread. After a restart
+                # there is no history: ask Codex to resend rather than continue
+                # from only the latest user line.
                 if resume and not is_lost_session(error) and str(error) != 'fresh':
                     raise
+                if resume and is_lost_session(error) and previous not in self.history:
+                    raise PreviousResponseLost(previous)
                 session, resume = str(uuid.uuid4()), False  # both CLIs require a dashed UUID
                 response = await runner(inference, executable, str(cwd), 240, session, False, None)
         except (BridgeError, asyncio.TimeoutError) as error:
@@ -603,9 +647,7 @@ class Router:
                               latency_ms=int((time.monotonic() - started) * 1000), resumed=int(resume))
             raise
         if not compact and response.get('id'):
-            self.sessions[response['id']] = (session, model)
-            while len(self.sessions) > 256:
-                self.sessions.popitem(last=False)
+            self.bind_session(response['id'], session, model)
         usage = response.get('usage') or {}
         cached = (usage.get('input_tokens_details') or {}).get('cached_tokens', 0)
         await self.record(thread=inference.get('prompt_cache_key'), model_requested=model, model_served=model,
@@ -629,7 +671,14 @@ class Router:
         new_items = request.get('input', [])
         if isinstance(new_items, str):
             new_items = [{'type': 'message', 'role': 'user', 'content': new_items}]
-        request = self.expand(request)
+        # After a router restart `history` is empty but sessions.json still
+        # names the CLI session. Skip expand so we resume with only new items
+        # instead of 404ing and forcing Codex to dump the whole thread.
+        if previous and previous not in self.history and self.continuation(previous, new_items, request.get('model')):
+            request = dict(request, input=new_items)
+            request.pop('previous_response_id', None)
+        else:
+            request = self.expand(request)
         if headers is not None:
             request['input'] = [await self.readable_checkpoint(x, headers)
                                 if x.get('type') == 'compaction' and not str(x.get('encrypted_content', '')).startswith(CHECKPOINT_PREFIX)

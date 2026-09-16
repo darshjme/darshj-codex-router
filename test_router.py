@@ -497,9 +497,23 @@ class GrokInvocationTests(unittest.IsolatedAsyncioTestCase):
         args = captured['args']
         blocks = json.loads(args[args.index('--prompt-json') + 1])
         self.assertEqual(blocks[0]['type'], 'text')
-        self.assertEqual(blocks[1]['type'], 'image')
-        self.assertEqual(blocks[1]['source']['data'], 'iVBORw0KGgo=')
+        self.assertEqual(blocks[1], {'type': 'image', 'data': 'iVBORw0KGgo=', 'mimeType': 'image/png'})
+        self.assertNotIn('source', blocks[1])
         self.assertNotIn('--prompt-file', args)
+
+    async def test_invalid_output_includes_cli_stderr(self):
+        class FakeProcess:
+            returncode = 1
+            pid = 1
+            async def communicate(self, data):
+                return b'', b'Error: --prompt-json: Invalid ACP content blocks: missing field `data`\n'
+        async def fake_exec(*args, **kwargs):
+            return FakeProcess()
+        with patch('asyncio.create_subprocess_exec', fake_exec), tempfile.TemporaryDirectory() as cwd:
+            with self.assertRaises(adapter.BridgeError) as raised:
+                await adapter.run_grok({'model': 'grok-max', 'input': 'hi'}, '/fake/grok', cwd)
+        self.assertIn('missing field `data`', str(raised.exception))
+        self.assertIn('exit 1', str(raised.exception))
 
     def test_imagine_media_is_copied_and_inlined(self):
         with tempfile.TemporaryDirectory() as cwd:
@@ -855,6 +869,46 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1][0], calls[0][0])
         self.assertEqual(calls[1][2], [{'type': 'function_call_output', 'call_id': 'c', 'output': 'x'}])
 
+    async def test_bridged_session_survives_router_restart(self):
+        calls = []
+        async def fake(req, executable, cwd, timeout=240, session=None, resume=False, delta=None):
+            calls.append({'session': session, 'resume': resume, 'delta': delta, 'items': len(req['input'])})
+            return dict(result(), id='resp_persist_%d' % len(calls), model='grok-max')
+        r = self.app['router']
+        with patch('router.run_grok', fake):
+            first = await r.claude_response({'model': 'grok-max', 'input': 'go'})
+        self.assertTrue((r.state / 'sessions.json').is_file())
+        restarted = router.Router(r.catalog, '/unused/claude', r.state, grok=r.grok)
+        restarted.codex_config = r.codex_config
+        self.assertEqual(restarted.sessions.get(first['id'])[0], calls[0]['session'])
+        self.assertEqual(len(restarted.history), 0)
+        with patch('router.run_grok', fake):
+            await restarted.claude_response({
+                'model': 'grok-max', 'previous_response_id': first['id'],
+                'input': [{'type': 'message', 'role': 'user', 'content': 'hi'}]})
+        self.assertEqual(calls[1]['resume'], True)
+        self.assertEqual(calls[1]['session'], calls[0]['session'])
+        self.assertEqual(calls[1]['delta'], [{'type': 'message', 'role': 'user', 'content': 'hi'}])
+        self.assertEqual(calls[1]['items'], 1)
+
+    async def test_lost_cli_session_after_restart_asks_codex_to_resend(self):
+        async def first_run(req, executable, cwd, timeout=240, session=None, resume=False, delta=None):
+            return dict(result(), id='resp_gone', model='grok-max')
+        r = self.app['router']
+        with patch('router.run_grok', first_run):
+            first = await r.claude_response({'model': 'grok-max', 'input': 'go'})
+        restarted = router.Router(r.catalog, '/unused/claude', r.state, grok=r.grok)
+        restarted.codex_config = r.codex_config
+        async def missing(req, executable, cwd, timeout=240, session=None, resume=False, delta=None):
+            if resume:
+                raise router.BridgeError('Grok CLI failed (exit 1): No conversation found with session ID: ' + session)
+            return dict(result(), id='resp_should_not', model='grok-max')
+        with patch('router.run_grok', missing):
+            with self.assertRaises(router.PreviousResponseLost) as raised:
+                await restarted.claude_response({
+                    'model': 'grok-max', 'previous_response_id': first['id'], 'input': 'hi'})
+        self.assertEqual(raised.exception.payload()['code'], 'previous_response_not_found')
+
     async def test_lost_session_falls_back_to_full_send(self):
         calls = []
         async def fake(req, executable, cwd, timeout=240, session=None, resume=False, delta=None):
@@ -909,10 +963,12 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
         gold.mkdir(exist_ok=True); gnew.mkdir(exist_ok=True)
         (gold / 'x').write_text('{}'); (gnew / 'x').write_text('{}')
         os.utime(gold, (1, 1))
+        r.sessions['resp_keep'] = (gold.name, 'grok-max')
         try:
-            self.assertEqual(r.prune_sessions(), 2)
+            self.assertEqual(r.prune_sessions(), 1)
             self.assertFalse(old.exists()); self.assertTrue(new.exists())
-            self.assertFalse(gold.exists()); self.assertTrue(gnew.exists())
+            self.assertTrue(gold.exists(), 'mapped grok session must survive prune')
+            self.assertTrue(gnew.exists())
         finally:
             import shutil
             for f in (old, new):

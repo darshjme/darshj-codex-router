@@ -267,14 +267,17 @@ tool call. The router keeps that from costing a full upload each time:
   declared, the bridge corrects the model once inside the same session, for
   a few hundred tokens, instead of failing the turn and letting Codex retry
   from scratch.
-- **Lost continuations.** The router remembers the last 256 responses for two
-  hours in memory. If Codex refers to one it no longer has (router restart or
-  eviction), the router answers in OpenAI's own wire shape (`404`,
+- **Lost continuations.** CLI session ids are stored in `state/sessions.json`
+  (last 256) so a router restart still resumes the same Grok or Claude
+  session and only new items are sent. The expanded transcript cache stays
+  in memory for two hours. If both the CLI session and that cache are gone,
+  the router answers in OpenAI's own wire shape (`404`,
   `previous_response_not_found`) so Codex resends the full thread instead of
   failing after retries.
 - **Pruning.** Bridge transcripts live under `~/.claude/projects/` and
   `~/.grok/sessions/` for the router's working directories and are deleted
-  after 48 hours when the service starts.
+  after 48 hours when the service starts, except Grok session directories
+  still named in `sessions.json`.
 
 The Requests tab shows tokens in / cached / out and a "resumed" flag per
 turn, so you can see whether a thread is actually hitting the cache. Ollama
@@ -413,7 +416,8 @@ What is stored where:
 | `state/service.log`, `state/service-error.log` | launchd stdout and stderr | manual |
 | `~/.claude/projects/…`, `~/.grok/sessions/…` | CLI session transcripts for the router's working directories | 48 hours |
 | `~/.codex/backups/darshj-codex-router/` | the original `config.toml` | until you delete it |
-| process memory | 256 continuations (2 h), 64 checkpoint summaries, live CLI session ids | service lifetime |
+| `state/sessions.json` | Codex response id → CLI session id + model | last 256, survives restart |
+| process memory | expanded transcript cache (2 h), 64 checkpoint summaries | service lifetime |
 
 ## Rollback and uninstall
 

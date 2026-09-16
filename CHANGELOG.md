@@ -1,5 +1,26 @@
 # Changes
 
+## 2026-09-16 (grok persist)
+
+- CLI session ids are written to `state/sessions.json`. A router restart
+  resumes the same Grok (or Claude) session with only the new items instead
+  of 404ing `previous_response_id` and forcing Codex to dump the whole thread.
+- If the CLI session file is gone after a restart, the router still 404s in
+  OpenAI's wire shape so Codex resends the full thread.
+- Pruning skips Grok session directories still named in that map.
+
+## 2026-09-16 (grok 502)
+
+- Grok CLI 1.0.30 `--prompt-json` is ACP content blocks. Image parts now send
+  top-level `data` + `mimeType`; the previous Claude-style `source` object made
+  Grok exit 1 with empty stdout, which Codex showed as
+  `502 Bad Gateway: Grok CLI returned invalid output (exit 1)` after a
+  screenshot or pasted image.
+- Bridge errors now include the CLI's last stderr line, so the next failure is
+  the real reason rather than "invalid output".
+- Text-only Grok prompts are written as `.txt` so Grok does not treat the
+  envelope JSON as an ACP file that requires a `type` field.
+
 ## 2026-09-16 (token diet)
 
 ### Changed

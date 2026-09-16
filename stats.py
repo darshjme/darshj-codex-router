@@ -12,9 +12,10 @@ Tables (see SSOT §5 for column meaning):
     events(id, ts, kind, detail)
     usage(id, ts, provider, window, utilization, resets_at)
 
-Token semantics follow ``adapter.structured_response``: ``input_tokens`` is the
-full prompt (fresh + cached), ``cached_tokens`` the cache-read subset, so
-``cache_hit_ratio = cached_tokens / input_tokens`` and ``fresh_tokens =
+Token semantics follow the router's recording: ``input_tokens`` is the FRESH
+(uncached) prompt and ``cached_tokens`` the cache-read part, so the whole prompt
+is their sum, ``cache_hit_ratio = cached_tokens / (input_tokens + cached_tokens)``
+and ``fresh_tokens = input_tokens``. The legacy wording was ``fresh_tokens =
 input_tokens - cached_tokens``. Percentiles are nearest-rank over the fetched
 latencies, computed in Python (fine at loopback-router scale).
 """
@@ -113,10 +114,11 @@ class _Aggregate:
         latencies = sorted(self.latencies)
         return {'requests': self.requests, 'errors': self.errors,
                 'input_tokens': self.input_tokens, 'cached_tokens': self.cached_tokens,
-                'fresh_tokens': max(self.input_tokens - self.cached_tokens, 0),
+                'fresh_tokens': self.input_tokens,
+                'prompt_tokens': self.input_tokens + self.cached_tokens,
                 'output_tokens': self.output_tokens, 'tool_calls': self.tool_calls,
                 'resumed': self.resumed, 'resumed_ratio': _ratio(self.resumed, self.requests),
-                'cache_hit_ratio': _ratio(self.cached_tokens, self.input_tokens),
+                'cache_hit_ratio': _ratio(self.cached_tokens, self.input_tokens + self.cached_tokens),
                 'error_ratio': _ratio(self.errors, self.requests),
                 'active_threads': len(self.threads),
                 'latency': {'avg': round(sum(latencies) / len(latencies), 1) if latencies else None,

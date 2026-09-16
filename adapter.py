@@ -133,6 +133,21 @@ def image_block(part):
         return {'type': 'image', 'source': {'type': 'url', 'url': url}}
     raise BridgeError('Unsupported image URL scheme was not sent.')
 
+def grok_content_blocks(prompt, images):
+    """Grok CLI 1.0.30 --prompt-json is ACP content blocks: image parts need
+    top-level `data` and `mimeType`. Claude-style `source` objects 502 the turn."""
+    blocks = [{'type': 'text', 'text': prompt}]
+    for image in images:
+        source = image.get('source') or {}
+        if source.get('type') == 'base64' and source.get('data'):
+            blocks.append({'type': 'image', 'data': source['data'],
+                           'mimeType': source.get('media_type') or 'image/png'})
+        elif source.get('type') == 'url' and source.get('url'):
+            blocks.append({'type': 'text', 'text': source['url']})
+        else:
+            raise BridgeError('Unsupported image source was not sent to Grok.')
+    return blocks
+
 def extract_images(obj, images):
     """Replace image parts in a Responses item with numbered placeholders,
     collecting native Claude image blocks in order."""
@@ -367,11 +382,25 @@ async def _run_structured(args, cwd, env, timeout, label, stdin=None):
             os.killpg(process.pid, signal.SIGKILL)
             await process.wait()
         raise
+    records, result = [], None
     try:
         records = [json.loads(line) for line in stdout.splitlines() if line.strip()]
         result = next(r for r in reversed(records) if r.get('type') == 'result')
     except (ValueError, UnicodeDecodeError, StopIteration):
-        raise BridgeError('%s returned invalid output (exit %s).' % (label, process.returncode))
+        stripped = stdout.strip()
+        if stripped:
+            try:
+                parsed = json.loads(stripped)
+            except (ValueError, UnicodeDecodeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                records = [parsed]
+                if parsed.get('type') == 'result':
+                    result = parsed
+        if result is None:
+            reason = (stderr.decode(errors='replace').strip().splitlines() or [''])[-1]
+            raise BridgeError('%s returned invalid output (exit %s)%s' % (
+                label, process.returncode, (': ' + reason) if reason else '.'))
     if process.returncode or result.get('is_error') or result.get('subtype') != 'success':
         # Auth and usage-limit failures arrive as subtype "success" with
         # is_error set; the human-readable reason is the result text.
@@ -701,9 +730,9 @@ async def run_grok(request, executable, cwd, timeout=240, session=None, resume=F
         args += ['--effort', effort]
     prompt_path = None
     if images:
-        args += ['--prompt-json', json.dumps([{'type': 'text', 'text': prompt}] + images, ensure_ascii=False)]
+        args += ['--prompt-json', json.dumps(grok_content_blocks(prompt, images), ensure_ascii=False)]
     else:
-        prompt_path = Path(cwd) / ('.prompt-' + uid('p'))
+        prompt_path = Path(cwd) / ('.prompt-' + uid('p') + '.txt')
         prompt_path.write_text(prompt, encoding='utf-8')
         args += ['--prompt-file', str(prompt_path)]
     env = os.environ.copy()

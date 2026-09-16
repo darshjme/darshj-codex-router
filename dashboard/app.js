@@ -591,7 +591,12 @@ const DCR = (function () {
     const flat = Math.abs(diff) < 0.0005, up = diff > 0;
     const cls = flat ? '' : (up === upIsGood ? 'good' : 'bad');
     const arrow = flat ? '—' : (up ? '▲' : '▼');
-    const amount = pp ? (Math.abs(diff) * 100).toFixed(1).replace(/\.0$/, '') + ' pp' : fmtPct(Math.abs(diff), 1);
+    // A near-empty previous period produces a meaningless ratio (e.g. 41800%);
+    // report the multiple instead, and cap it so the tile stays readable.
+    let amount;
+    if (pp) amount = (Math.abs(diff) * 100).toFixed(1).replace(/\.0$/, '') + ' pp';
+    else if (Math.abs(diff) >= 9.995) amount = (Math.abs(diff) >= 99.5 ? '>100' : (Math.abs(diff) + 1).toFixed(0)) + '\u00d7';
+    else amount = fmtPct(Math.abs(diff), 1);
     return '<span class="delta ' + cls + '"><span class="arrow" aria-hidden="true">' + arrow + '</span><span class="sr-only">' +
       (flat ? 'unchanged' : (up ? 'up' : 'down')) + '</span> ' + (flat ? '' : amount + ' ') + esc(label) + '</span>';
   }
@@ -633,7 +638,7 @@ const DCR = (function () {
       list = emptyHtml('Ollama not detected at ' + base, 'Install from ollama.com, run `ollama pull llama3.2`, then Refresh.');
     }
     const statusChip = state.health
-      ? '<span class="chip"><span class="dot ' + (online ? 'good' : 'critical') + '" aria-hidden="true"></span>' + (online ? 'Online' : 'Offline') + ' · ' + fmtInt(countOf(h.models)) + ' models</span>'
+      ? '<span class="chip"><span class="dot ' + (online ? 'good' : 'critical') + '" aria-hidden="true"></span>' + (online ? 'Online' : 'Offline') + ' · ' + fmtInt(countOf(h.models)) + ' model' + (countOf(h.models) === 1 ? '' : 's') + '</span>'
       : '';
     return '<section class="card" aria-labelledby="' + id + '-title" data-panel="ollama">' +
       '<div class="card-head"><div><p class="eyebrow">Local models</p><h2 id="' + id + '-title">Ollama</h2></div>' + statusChip + '</div>' +

@@ -278,6 +278,18 @@ class DashboardCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body['reserve_model'], 'claude-max-fable')
         self.assertEqual(body['ollama'], {'enabled': True, 'base_url': 'http://127.0.0.1:11434', 'online': True, 'models': 1})
 
+    async def test_cache_hit_ratio_is_a_ratio(self):
+        """Regression: the router records fresh and cached separately, so the
+        ratio must stay within 0..1 even when cache reads dwarf fresh tokens."""
+        await self.stats.record_request(ts=time.time(), provider='claude', model_served='claude-max-opus-48',
+                                        kind='turn', status='ok', latency_ms=100,
+                                        input_tokens=500, cached_tokens=60000, output_tokens=100)
+        r = await self.client.get('/api/v1/stats/summary', headers=self.bearer)
+        totals = (await r.json())['totals']
+        self.assertLessEqual(totals['cache_hit_ratio'], 1.0)
+        self.assertEqual(totals['cache_hit_ratio'], round(60000 / 60500, 4))
+        self.assertEqual(totals['prompt_tokens'], 60500)
+
     async def test_summary_math(self):
         await self.seed()
         r = await self.client.get('/api/v1/stats/summary', headers=self.bearer)
@@ -290,9 +302,10 @@ class DashboardCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(totals['error_ratio'], round(4 / 30, 4))
         self.assertEqual(totals['input_tokens'], 30000)
         self.assertEqual(totals['cached_tokens'], 4800)
-        self.assertEqual(totals['fresh_tokens'], 25200)
+        self.assertEqual(totals['fresh_tokens'], 30000)          # input_tokens is the fresh part
+        self.assertEqual(totals['prompt_tokens'], 34800)         # fresh + cached
         self.assertEqual(totals['output_tokens'], 1500)
-        self.assertEqual(totals['cache_hit_ratio'], 0.16)
+        self.assertEqual(totals['cache_hit_ratio'], round(4800 / 34800, 4))
         self.assertEqual(totals['resumed'], 15)
         self.assertEqual(totals['resumed_ratio'], 0.5)
         self.assertEqual(totals['tool_calls'], 30)
@@ -302,7 +315,10 @@ class DashboardCase(unittest.IsolatedAsyncioTestCase):
         providers = body['providers']
         self.assertEqual({k: v['requests'] for k, v in providers.items()},
                          {'claude': 12, 'grok': 6, 'ollama': 6, 'openai': 6})
-        self.assertEqual(providers['claude']['cache_hit_ratio'], 0.4)
+        claude = providers['claude']
+        self.assertEqual(claude['cache_hit_ratio'],
+                         round(claude['cached_tokens'] / (claude['input_tokens'] + claude['cached_tokens']), 4))
+        self.assertLessEqual(claude['cache_hit_ratio'], 1.0)
         self.assertEqual(providers['grok']['cache_hit_ratio'], 0.0)
         self.assertEqual({k: v['errors'] for k, v in providers.items()}, {'claude': 1, 'grok': 1, 'ollama': 1, 'openai': 1})
         self.assertEqual(body['models']['claude-max-fable']['requests'], 12)
