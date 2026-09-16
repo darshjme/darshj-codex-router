@@ -1,18 +1,22 @@
 # Darshj's Codex Router
 
-Every model you pay for, in one picker.
+Every model you pay for, in one picker. Version **1.0.0**. MIT.
 
-Darshj's Codex Router (DCR) is a small loopback service at `127.0.0.1:18740`
-that puts Claude (your Claude Max login, through Claude Code), Grok (your
-grok.com login, through Grok CLI) and local Ollama models into the Codex
-desktop app's native model picker. Codex talks to the router the way it talks
-to OpenAI. For the bridged entries the router drives the unmodified Claude Code
-or Grok CLI binaries, or Ollama's HTTP API; everything else is forwarded to the
-real ChatGPT Codex endpoint. A web dashboard at
-`http://127.0.0.1:18740/dashboard/` shows what went where and what it cost in
-tokens. The app binary is not patched and no login tokens are read: the only
-changes on your machine are two keys in `~/.codex/config.toml` and a per-user
+Public source: [github.com/darshjme/darshj-codex-router](https://github.com/darshjme/darshj-codex-router).
+
+Darshj's Codex Router (DCR) is a loopback service at `127.0.0.1:18740`
+that puts Claude (Claude Max via Claude Code), Grok (grok.com via Grok CLI)
+and local Ollama models into the Codex desktop app's native model picker.
+Codex talks to the router the way it talks to OpenAI. Bridged entries run
+unmodified CLI binaries; everything else is forwarded to the ChatGPT Codex
+endpoint. A dashboard at `http://127.0.0.1:18740/dashboard/` shows routing
+and token counts. The Codex app binary is not patched and login tokens are
+not read: install writes two keys in `~/.codex/config.toml` and a per-user
 launchd service.
+
+CLI session ids are stored in `state/sessions.json` so a router restart
+resumes the same Grok or Claude session. GitHub Actions is disabled; run
+tests locally.
 
 Contents: [Models](#models) · [Install](#install) · [Using it](#using-it) ·
 [Dashboard](#dashboard) · [Ollama](#ollama) · [Token use](#token-use) ·
@@ -49,11 +53,13 @@ Requirements:
 - Optional: Ollama at `http://127.0.0.1:11434` with at least one pulled model.
 
 ```sh
-git clone https://github.com/darshjme/darshj-codex-router ~/repos/darshj-codex-router
-cd ~/repos/darshj-codex-router
+git clone https://github.com/darshjme/darshj-codex-router.git
+cd darshj-codex-router
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m unittest -v test_router test_ollama test_dashboard_api
+# install.py reads models.base.json; the snapshot in this repo is models.json
+test -f models.base.json || cp models.json models.base.json
+.venv/bin/python -m unittest -q test_router test_ollama test_dashboard_api
 .venv/bin/python install.py install
 ```
 
