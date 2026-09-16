@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="same-origin">
+  <title>Overview · Darshj's Codex Router</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23191919'/%3E%3Ctext x='16' y='21' font-family='Sora,Arial,sans-serif' font-size='11' font-weight='700' text-anchor='middle' fill='%23e4f222'%3EDCR%3C/text%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=Plus+Jakarta+Sans:wght@500;600&family=Sora:wght@600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/dashboard/styles.css">
+  <script>
+    /* Apply the persisted theme before first paint so the page never flashes the wrong scheme. */
+    (function () {
+      try {
+        var t = localStorage.getItem('dcr-theme');
+        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+      } catch (e) { /* storage blocked: fall back to prefers-color-scheme */ }
+    })();
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <div id="app" class="app" data-mode="loading">
+    <aside id="rail" class="rail" hidden>
+      <a class="wordmark" href="#/overview" aria-label="Darshj's Codex Router — Overview">
+        <span class="mono" aria-hidden="true">DCR</span>
+        <span class="wordmark-text">Darshj's Codex Router</span>
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <ul>
+          <li><a href="#/overview" data-view="overview">Overview</a></li>
+          <li><a href="#/models" data-view="models">Models</a></li>
+          <li><a href="#/requests" data-view="requests">Requests</a></li>
+          <li><a href="#/usage" data-view="usage">Usage</a></li>
+          <li><a href="#/settings" data-view="settings">Settings</a></li>
+          <li><a href="#/api" data-view="api">API</a></li>
+        </ul>
+      </nav>
+      <div class="rail-foot">
+        <div class="health" id="health">
+          <span class="dot" id="health-dot" aria-hidden="true"></span>
+          <span id="health-text">Checking router…</span>
+        </div>
+        <div class="uptime" id="health-uptime"></div>
+      </div>
+    </aside>
+
+    <div class="shell">
+      <header id="topbar" class="topbar" hidden>
+        <h1 id="page-title">Overview</h1>
+        <div class="tools">
+          <fieldset class="seg" id="range-picker">
+            <legend class="sr-only">Time range</legend>
+            <label><input type="radio" name="range" value="1h"><span>1h</span></label>
+            <label><input type="radio" name="range" value="24h"><span>24h</span></label>
+            <label><input type="radio" name="range" value="7d"><span>7d</span></label>
+            <label><input type="radio" name="range" value="30d"><span>30d</span></label>
+          </fieldset>
+          <a class="chip" id="reserve-chip" href="#/models" title="Model that answers Codex reserve turns">Codex reserve: <strong id="reserve-chip-model">…</strong></a>
+          <button type="button" class="btn btn-ghost btn-sm theme-toggle" id="theme-toggle" aria-label="Theme: Auto. Switch theme">
+            <span class="theme-icon" id="theme-icon" aria-hidden="true"></span>
+            <span id="theme-label">Auto</span>
+          </button>
+        </div>
+      </header>
+
+      <main id="main" class="content" tabindex="-1">
+        <section id="view-login" class="view view-login" data-view="login" aria-labelledby="login-title" hidden>
+          <div class="login-card card">
+            <div class="wordmark">
+              <span class="mono" aria-hidden="true">DCR</span>
+              <span class="wordmark-text">Darshj's Codex Router</span>
+            </div>
+            <h2 id="login-title">Sign in</h2>
+            <p class="lead">Paste the dashboard token to open the router dashboard. The session stays on this machine only.</p>
+            <form id="login-form" novalidate>
+              <div class="field">
+                <label for="token">Dashboard token</label>
+                <input class="input" id="token" name="token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="login-error">
+              </div>
+              <p class="form-error" id="login-error" role="alert" hidden></p>
+              <button class="btn btn-primary" id="login-submit" type="submit">Sign in</button>
+            </form>
+            <details class="details">
+              <summary>Where is my token?</summary>
+              <p class="hint">Run this in a terminal and paste the output:</p>
+              <div class="codeblock">
+                <pre><code id="token-cmd">cat ~/repos/darshj-codex-router/state/dashboard-token</code></pre>
+                <button type="button" class="btn btn-ghost btn-sm copy-btn-block" data-copy="cat ~/repos/darshj-codex-router/state/dashboard-token" data-what="Command">Copy</button>
+              </div>
+              <p class="hint">Or run <code>python3 install.py token</code> from the router folder.</p>
+            </details>
+          </div>
+        </section>
+
+        <section id="view-overview" class="view" data-view="overview" aria-label="Overview" hidden></section>
+        <section id="view-models" class="view" data-view="models" aria-label="Models" hidden></section>
+        <section id="view-requests" class="view" data-view="requests" aria-label="Requests" hidden></section>
+        <section id="view-usage" class="view" data-view="usage" aria-label="Usage" hidden></section>
+        <section id="view-settings" class="view" data-view="settings" aria-label="Settings" hidden></section>
+        <section id="view-api" class="view" data-view="api" aria-label="API" hidden></section>
+      </main>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite" aria-relevant="additions"></div>
+
+  <script src="/dashboard/app.js"></script>
+</body>
+</html>

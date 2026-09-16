@@ -47,7 +47,13 @@ CHECKPOINT_UNAVAILABLE = ('An earlier part of this conversation was compacted by
 # Codex desktop forces this slug on every turn while its "Luna reserve" mode is
 # active (OpenAI advanced-model quota exhausted). The router serves such turns
 # with a bridged model of the user's choice instead of OpenAI's reserve model.
-VERSION = '1.0.0'
+def _read_version():
+    try:
+        return (Path(__file__).parent / 'VERSION').read_text().strip() or '0.0.0'
+    except OSError:
+        return '0.0.0'
+
+VERSION = _read_version()
 OLLAMA_PREFIX = 'ollama-'
 DEFAULT_SETTINGS = {'ollama': {'enabled': True, 'base_url': 'http://127.0.0.1:11434'}}
 
@@ -450,6 +456,7 @@ class Router:
             self.generate_catalog()
         if self.stats is not None:
             await self.stats.record_event('startup', VERSION)
+            await self.stats.prune(keep_days=90)
 
     async def cleanup(self, app):
         await self.session.close()

@@ -1,5 +1,63 @@
 # Changes
 
+## 1.0.0 — 2026-09-16 (rebrand + dashboard)
+
+First tagged release, renamed from Codex Max Router to Darshj's Codex Router.
+
+### Added
+
+- Web dashboard at `http://127.0.0.1:18740/dashboard/` with Overview, Models,
+  Requests, Usage, Settings and API tabs; token login with an HMAC cookie
+  (`HttpOnly`, `SameSite=Strict`, 30 days, lockout after 10 failed attempts in
+  10 minutes); light and dark themes; hand-drawn SVG charts; no framework and
+  no CDN scripts.
+- JSON API under `/api/v1`: health, auth (login, logout, status, rotate),
+  stats summary and timeseries, request history with cursor paging, Claude
+  usage windows, models, settings, per-thread reserve override deletion and
+  Ollama refresh. Documented in `docs/API.md`.
+- Stats store `state/stats.sqlite` (stdlib SQLite, WAL) recording per-request
+  metadata, events and Claude usage windows; no prompts. A `prune(keep_days=90)`
+  routine is provided; the service does not schedule it yet.
+- Ollama provider (`ollama.py`): local models discovered from `/api/tags` and
+  `/api/show` appear in the Codex picker as `ollama-<name>`; stateless turns
+  through `/api/chat` using the same tool envelope as the Claude and Grok
+  bridges; vision models accept images; `num_ctx` capped at 32,768.
+- Generated catalog: `models.base.json` (tracked) plus discovered Ollama
+  entries is written to `state/models.json` at start and on refresh.
+- Installer subcommands `status`, `token` and `migrate --from DIR` (carries
+  reserve, settings, stats, token and the install manifest over from another
+  checkout), and `--version`.
+- `LICENSE` (MIT), `VERSION`, `docs/API.md`, and `docs/img/` for dashboard
+  screenshots.
+
+### Changed
+
+- Product name, repository (`darshj-codex-router`) and launchd label
+  (`ai.darshj.codex-router`, was `ai.darsh.codex-max-router`).
+  `install.py install` retires the old label and parks its plist under
+  `state/`.
+- `model_catalog_json` now points at the generated `state/models.json`; the
+  service starts with `--catalog state/models.json --base-catalog
+  models.base.json --port 18740`.
+- `/` redirects to `/dashboard/`; the old selector page is gone. The reserve
+  default is set from the dashboard's Models tab or `PUT /api/v1/settings`
+  (`POST /select` still works and redirects to the dashboard).
+- New `state/settings.json` holds the Ollama enabled flag and base URL.
+- Config backups for new installs go to `~/.codex/backups/darshj-codex-router/`.
+- README rewritten for the new name and the dashboard; the technical sections
+  on sessions, checkpoints, passthroughs and reserve routing were kept and
+  brought up to date.
+
+### Fixed
+
+- Installer: a service that never becomes healthy during `install` now rolls
+  back to the previously loaded service instead of leaving no router running,
+  and `install` refuses to start when the venv, `router.py` or
+  `models.base.json` are missing rather than bootstrapping a crash-looping
+  service.
+- Installer: running `uninstall` twice no longer fails with "changed since
+  install"; the manifest records that nothing is currently installed.
+
 ## 2026-09-16 (luna reserve)
 
 - An unknown `previous_response_id` (router restart or eviction) is now
