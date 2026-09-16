@@ -958,11 +958,10 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
             await ws.close()
 
     async def test_selector_page(self):
-        page = await self.client.get('/')
-        self.assertEqual(page.status, 200)
-        html = await page.text()
-        self.assertIn('claude-max-opus-48', html)
-        self.assertIn('checked', html)
+        # The old selector page is now the dashboard; '/' redirects there.
+        page = await self.client.get('/', allow_redirects=False)
+        self.assertEqual(page.status, 302)
+        self.assertEqual(page.headers['Location'], '/dashboard/')
         base = str(self.client.make_url('')).rstrip('/')
         # Cross-site form posts are refused; same-origin ones apply.
         r = await self.client.post('/select', data={'model': 'claude-max-fable'}, headers={'Origin': 'https://evil.example'})

@@ -13,7 +13,16 @@ import uuid
 from pathlib import Path
 from aiohttp import web, ClientSession, ClientTimeout, WSMsgType
 import zstandard
-from adapter import MODELS, GROK_MODELS, BridgeError, PreviousResponseLost, run_claude, run_grok, response_events, CHECKPOINT_PREFIX, uid
+try:  # Box A/B modules (see docs/SSOT.md); the core router runs without them.
+    import ollama as ollama_provider
+except ImportError:  # pragma: no cover
+    ollama_provider = None
+try:
+    import stats as stats_module
+    import dashboard_api
+except ImportError:  # pragma: no cover
+    stats_module = dashboard_api = None
+from adapter import MODELS, GROK_MODELS, CLAUDE_MODELS, BridgeError, PreviousResponseLost, run_claude, run_grok, response_events, CHECKPOINT_PREFIX, uid
 import base64
 
 UPSTREAM = 'https://chatgpt.com/backend-api/codex'
@@ -38,6 +47,19 @@ CHECKPOINT_UNAVAILABLE = ('An earlier part of this conversation was compacted by
 # Codex desktop forces this slug on every turn while its "Luna reserve" mode is
 # active (OpenAI advanced-model quota exhausted). The router serves such turns
 # with a bridged model of the user's choice instead of OpenAI's reserve model.
+VERSION = '1.0.0'
+OLLAMA_PREFIX = 'ollama-'
+DEFAULT_SETTINGS = {'ollama': {'enabled': True, 'base_url': 'http://127.0.0.1:11434'}}
+
+def provider_of(model):
+    if model in CLAUDE_MODELS:
+        return 'claude'
+    if model in GROK_MODELS:
+        return 'grok'
+    if isinstance(model, str) and model.startswith(OLLAMA_PREFIX):
+        return 'ollama'
+    return 'openai'
+
 RESERVE_SLUG = 'gpt-reserve'
 DEFAULT_RESERVE_TARGET = 'claude-max-opus-48'
 MODEL_ALIASES = {'fable': 'claude-max-fable', 'opus': 'claude-max-opus', 'opus-5': 'claude-max-opus',
@@ -161,9 +183,13 @@ def forward_headers(headers):
     return {k: v for k, v in headers.items() if k.lower() not in excluded}
 
 class Router:
-    def __init__(self, catalog, claude, state, grok=None, port=18740):
+    def __init__(self, catalog, claude, state, grok=None, port=18740, base_catalog=None):
         self.port = port
+        self.started = time.time()
+        # `catalog` is what Codex reads; with a base catalog it is regenerated
+        # from base + discovered Ollama models (see docs/SSOT.md §3).
         self.catalog = Path(catalog)
+        self.base_catalog = Path(base_catalog) if base_catalog else None
         self.claude = claude
         self.grok = grok or str(Path.home() / '.local/bin/grok')
         self.state = Path(state)
@@ -173,8 +199,14 @@ class Router:
         self.grok_cwd = self.state / 'grok-work'
         self.grok_cwd.mkdir(exist_ok=True, mode=0o700)
         self.reserve_file = self.state / 'reserve.json'
+        self.settings_file = self.state / 'settings.json'
+        self.token_path = self.state / 'dashboard-token'
         self.codex_config = Path.home() / '.codex/config.toml'
         self.reserve = self.load_reserve()
+        self.settings = self.load_settings()
+        self.ollama_models = {}   # slug -> Ollama model name
+        self.ollama_online = False
+        self.stats = None
         self.history = collections.OrderedDict()
         self.checkpoints = collections.OrderedDict()
         # response id -> (Claude Code session id, model): lets the next turn of
@@ -182,8 +214,87 @@ class Router:
         self.sessions = collections.OrderedDict()
         # Sized for Codex sub-agent fan-out: several agents share this bridge.
         self.semaphore = asyncio.Semaphore(4)
-        self.counts = {'claude': 0, 'grok': 0, 'openai': 0, 'fallback': 0, 'errors': 0}
+        self.counts = {'claude': 0, 'grok': 0, 'ollama': 0, 'openai': 0, 'fallback': 0, 'errors': 0}
         self.session = None
+
+    # ---- settings (dashboard-editable, persisted) ----
+    def load_settings(self):
+        data = {}
+        try:
+            data = json.loads(self.settings_file.read_text())
+        except (OSError, ValueError):
+            pass
+        merged = json.loads(json.dumps(DEFAULT_SETTINGS))
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                    merged[key].update(value)
+                else:
+                    merged[key] = value
+        return merged
+
+    def save_settings(self):
+        tmp = self.settings_file.with_suffix('.tmp')
+        tmp.write_text(json.dumps(self.settings, indent=1))
+        tmp.replace(self.settings_file)
+
+    # ---- catalog: base + discovered Ollama models -> the file Codex reads ----
+    def generate_catalog(self):
+        if not self.base_catalog:
+            return None
+        base = json.loads(self.base_catalog.read_text())
+        entries = [m for m in base.get('models', []) if not str(m.get('slug', '')).startswith(OLLAMA_PREFIX)]
+        template = next((m for m in entries if m.get('slug') == 'claude-max-sonnet'), None)
+        if template and ollama_provider is not None:
+            for slug, model in self.ollama_models.items():
+                entries.append(ollama_provider.catalog_entry(template, model))
+        out = dict(base, models=entries)
+        tmp = self.catalog.with_suffix('.tmp')
+        tmp.write_text(json.dumps(out, indent=2) + '\n')
+        tmp.replace(self.catalog)
+        return self.catalog
+
+    async def refresh_ollama(self):
+        """Discover local Ollama models, register their slugs, regenerate the catalog."""
+        found = []
+        conf = self.settings.get('ollama') or {}
+        if ollama_provider is not None and conf.get('enabled', True) and self.session is not None:
+            found = await ollama_provider.discover(self.session, conf.get('base_url') or DEFAULT_SETTINGS['ollama']['base_url'])
+        self.ollama_online = bool(found)
+        for slug in [k for k in MODELS if k.startswith(OLLAMA_PREFIX)]:
+            MODELS.pop(slug, None)
+        self.ollama_models = {}
+        for model in found:
+            slug = ollama_provider.slug_for(model['name'])
+            self.ollama_models[slug] = model
+            MODELS[slug] = model['name']
+        catalog = self.generate_catalog()
+        if self.stats is not None:
+            await self.stats.record_event('ollama_refresh', '%d models' % len(found))
+        return {'models': [dict(m, slug=s) for s, m in self.ollama_models.items()],
+                'catalog': str(catalog or self.catalog)}
+
+    async def record(self, **fields):
+        """Best-effort stats write; never lets telemetry break a request."""
+        if self.stats is None:
+            return
+        try:
+            await self.stats.record_request(**fields)
+        except Exception:  # pragma: no cover - telemetry must not raise
+            pass
+
+    async def record_usage_headers(self, headers):
+        if self.stats is None or not headers:
+            return
+        for name, window in (('primary', 'five_hour'), ('secondary', 'seven_day')):
+            used = headers.get('x-codex-%s-used-percent' % name)
+            reset = headers.get('x-codex-%s-reset-at' % name)
+            if used is None:
+                continue
+            try:
+                await self.stats.record_usage('claude', window, int(used) / 100.0, int(reset) if reset else None)
+            except Exception:  # pragma: no cover
+                pass
 
     # ---- Luna reserve: which bridged model answers gpt-reserve turns ----
     def load_reserve(self):
@@ -258,6 +369,9 @@ class Router:
                         % (command.group(1), self.reserve_menu(), self.port))
             direct = notice_response(RESERVE_SLUG, text)
             self.record_direct(data, direct, target or self.reserve_target(data))
+            asyncio.ensure_future(self.record(thread=thread, model_requested=RESERVE_SLUG, model_served=target,
+                                              provider='router', kind='command', status='ok' if target else 'error',
+                                              error=None if target else 'unknown model', latency_ms=0))
             return data, direct, None
         target = self.reserve_target(data)
         rewritten = dict(data, model=target)
@@ -325,10 +439,21 @@ class Router:
 
     async def startup(self, app):
         self.prune_sessions()
+        if stats_module is not None and self.stats is None:
+            self.stats = stats_module.Stats(self.state / 'stats.sqlite')
+            await self.stats.open()
         self.session = ClientSession(timeout=ClientTimeout(total=360), trust_env=False)
+        try:
+            await self.refresh_ollama()
+        except Exception:  # pragma: no cover - Ollama is optional
+            self.generate_catalog()
+        if self.stats is not None:
+            await self.stats.record_event('startup', VERSION)
 
     async def cleanup(self, app):
         await self.session.close()
+        if self.stats is not None:
+            await self.stats.close()
 
     def remember(self, request, response):
         if not response.get('id'):
@@ -416,25 +541,52 @@ class Router:
         return saved[0]
 
     async def bridged(self, runner, executable, cwd, inference, previous, new_items, compact):
-        """Run one turn through a CLI bridge, resuming the thread's session when possible."""
-        session = None if compact else self.continuation(previous, new_items, inference['model'])
+        """Run one turn through a bridge, resuming the thread's session when possible,
+        and record the outcome in the stats store."""
+        model = inference['model']
+        provider = provider_of(model)
+        session = None if compact else self.continuation(previous, new_items, model)
         resume = session is not None
+        started = time.monotonic()
         try:
-            if resume:
-                response = await runner(inference, executable, str(cwd), 240, session, True, new_items)
-            else:
-                raise BridgeError('fresh')
-        except BridgeError as error:
-            # A lost or corrupt session falls back to a full send in a new one.
-            if resume and not is_lost_session(error) and str(error) != 'fresh':
-                raise
-            session, resume = str(uuid.uuid4()), False  # both CLIs require a dashed UUID
-            response = await runner(inference, executable, str(cwd), 240, session, False, None)
+            try:
+                if resume:
+                    response = await runner(inference, executable, str(cwd), 240, session, True, new_items)
+                else:
+                    raise BridgeError('fresh')
+            except BridgeError as error:
+                # A lost or corrupt session falls back to a full send in a new one.
+                if resume and not is_lost_session(error) and str(error) != 'fresh':
+                    raise
+                session, resume = str(uuid.uuid4()), False  # both CLIs require a dashed UUID
+                response = await runner(inference, executable, str(cwd), 240, session, False, None)
+        except (BridgeError, asyncio.TimeoutError) as error:
+            await self.record(thread=inference.get('prompt_cache_key'), model_requested=model, model_served=model,
+                              provider=provider, kind='compact' if compact else 'turn', status='error',
+                              error=str(error) or type(error).__name__,
+                              latency_ms=int((time.monotonic() - started) * 1000), resumed=int(resume))
+            raise
         if not compact and response.get('id'):
-            self.sessions[response['id']] = (session, inference['model'])
+            self.sessions[response['id']] = (session, model)
             while len(self.sessions) > 256:
                 self.sessions.popitem(last=False)
+        usage = response.get('usage') or {}
+        cached = (usage.get('input_tokens_details') or {}).get('cached_tokens', 0)
+        await self.record(thread=inference.get('prompt_cache_key'), model_requested=model, model_served=model,
+                          provider=provider, kind='compact' if compact else 'turn', status='ok', error=None,
+                          latency_ms=int((time.monotonic() - started) * 1000),
+                          input_tokens=max(usage.get('input_tokens', 0) - cached, 0), cached_tokens=cached,
+                          output_tokens=usage.get('output_tokens', 0), resumed=int(resume),
+                          tool_calls=sum(1 for i in response.get('output', []) if i.get('type') in ('function_call', 'custom_tool_call')))
+        await self.record_usage_headers(response.get('rate_limit_headers'))
         return response
+
+    async def run_ollama_bridge(self, inference, executable, cwd, timeout, session, resume, delta):
+        """Adapter to the CLI runner signature used by bridged(); Ollama is stateless."""
+        conf = self.settings.get('ollama') or {}
+        name = self.ollama_models.get(inference['model'], {}).get('name') or MODELS.get(inference['model'])
+        return await ollama_provider.run_ollama(inference, self.session, conf.get('base_url') or DEFAULT_SETTINGS['ollama']['base_url'],
+                                                name, 300, session, resume, delta)
 
     async def claude_response(self, request, fallback=False, headers=None):
         previous = request.get('previous_response_id')
@@ -460,12 +612,17 @@ class Router:
                 'the task or call tools. Do not copy credentials. Keep the checkpoint under 3000 words.\n'
                 + json.dumps(material)}]}
         async with self.semaphore:
-            if inference.get('model') in GROK_MODELS:
+            provider = provider_of(inference.get('model'))
+            if provider == 'grok':
                 response = await self.bridged(run_grok, self.grok, self.grok_cwd, inference, previous, new_items, compact)
-                self.counts['grok'] += 1
+            elif provider == 'ollama':
+                if ollama_provider is None:
+                    raise BridgeError('Ollama support is not installed in this router build.')
+                response = await self.bridged(self.run_ollama_bridge, None, self.state, inference, previous, new_items, compact)
             else:
+                provider = 'claude'
                 response = await self.bridged(run_claude, self.claude, self.claude_cwd, inference, previous, new_items, compact)
-                self.counts['claude'] += 1
+            self.counts[provider] = self.counts.get(provider, 0) + 1
         if compact:
             summary = '\n'.join(part['text'] for item in response['output'] if item['type'] == 'message'
                                 for part in item['content'] if part['type'] == 'output_text')
@@ -493,10 +650,11 @@ class Router:
         if host not in ('127.0.0.1', 'localhost') or (origin and not (same_origin and request.path == '/select')):
             raise web.HTTPForbidden(text='Loopback native clients only')
         if request.path == '/health':
-            return web.json_response({'status': 'ok', 'models': list(MODELS), 'counts': self.counts,
-                                      'reserve_model': self.reserve_target({})})
-        if request.path in ('/', '/select') and request.method == 'GET':
-            return web.Response(text=self.selector_page(), content_type='text/html')
+            return web.json_response({'status': 'ok', 'version': VERSION, 'models': list(MODELS), 'counts': self.counts,
+                                      'reserve_model': self.reserve_target({}),
+                                      'ollama': {'online': self.ollama_online, 'models': len(self.ollama_models)}})
+        if request.path in ('/', '/select', '/dashboard') and request.method == 'GET':
+            raise web.HTTPFound('/dashboard/')
         if request.path == '/select' and request.method == 'POST':
             if not same_origin:
                 raise web.HTTPForbidden(text='Same-origin form only')
@@ -505,7 +663,7 @@ class Router:
                 self.set_reserve_model(form.get('model'))
             except ValueError as error:
                 raise web.HTTPBadRequest(text=str(error))
-            raise web.HTTPSeeOther('/')
+            raise web.HTTPSeeOther('/dashboard/')
         if not request.headers.get('Authorization', '').startswith('Bearer '):
             raise web.HTTPUnauthorized(text='Codex authentication required')
         if request.path == '/models':
@@ -533,10 +691,15 @@ class Router:
 
     async def passthrough(self, request):
         body = await self.read_body(request)
+        started = time.monotonic()
         async with self.session.request(request.method, UPSTREAM + request.path_qs,
                 data=body, headers=forward_headers(request.headers), allow_redirects=False) as upstream:
-            return web.Response(status=upstream.status, body=await upstream.read(),
-                                content_type=upstream.content_type)
+            payload = await upstream.read()
+            await self.record(thread=None, model_requested=None, model_served=None, provider='openai', kind='passthrough',
+                              status='ok' if upstream.status < 400 else 'error',
+                              error=None if upstream.status < 400 else 'HTTP %d' % upstream.status,
+                              latency_ms=int((time.monotonic() - started) * 1000), path=request.path)
+            return web.Response(status=upstream.status, body=payload, content_type=upstream.content_type)
 
     async def relay_websocket(self, request):
         """Bidirectional relay for the voice WebSocket; no inspection or fallback."""
@@ -704,12 +867,18 @@ class Router:
                 await upstream.close()
         return ws
 
-def create_app(catalog, claude, state, grok=None, port=18740):
-    router = Router(catalog, claude, state, grok, port)
+def create_app(catalog, claude, state, grok=None, port=18740, base_catalog=None):
+    router = Router(catalog, claude, state, grok, port, base_catalog)
     app = web.Application(client_max_size=32 * 1024 * 1024, handler_args={'auto_decompress': False})
     app['router'] = router
     app.on_startup.append(router.startup)
     app.on_cleanup.append(router.cleanup)
+    if stats_module is not None and dashboard_api is not None:
+        # Dashboard + JSON API (docs/SSOT.md §5) are mounted before the catch-all.
+        router.stats = stats_module.Stats(router.state / 'stats.sqlite')
+        static_dir = Path(__file__).parent / 'dashboard'
+        app.add_subapp('/api/v1', dashboard_api.build(router, router.stats, static_dir))
+        app.add_subapp('/dashboard', dashboard_api.static_app(static_dir))
     app.router.add_route('*', '/{path:.*}', router.handle)
     return app
 
@@ -720,6 +889,9 @@ if __name__ == '__main__':
     parser.add_argument('--claude', default=str(Path.home() / '.local/bin/claude'))
     parser.add_argument('--grok', default=str(Path.home() / '.local/bin/grok'))
     parser.add_argument('--state', default=str(Path(__file__).parent / 'state'))
+    parser.add_argument('--base-catalog', default=None,
+                        help='tracked base catalog; --catalog is then regenerated from it plus Ollama models')
     args = parser.parse_args()
-    web.run_app(create_app(args.catalog, args.claude, args.state, args.grok, args.port), host='127.0.0.1', port=args.port,
+    web.run_app(create_app(args.catalog, args.claude, args.state, args.grok, args.port, args.base_catalog),
+                host='127.0.0.1', port=args.port,
                 access_log=None, handler_cancellation=True)
