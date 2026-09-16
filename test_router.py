@@ -990,6 +990,77 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
         await ws.close()
         self.assertEqual(self.app['router'].counts['errors'], 0)
 
+    async def test_provider_dispatch_and_stats_recording(self):
+        import types
+        recorded = []
+        class FakeStats:
+            async def record_request(self, **f): recorded.append(f)
+            async def record_event(self, *a): pass
+            async def record_usage(self, *a): recorded.append({'usage': a})
+            async def close(self): pass
+        r = self.app['router']
+        r.stats = FakeStats()
+        self.assertEqual(router.provider_of('claude-max-fable'), 'claude')
+        self.assertEqual(router.provider_of('grok-max'), 'grok')
+        self.assertEqual(router.provider_of('ollama-llama3.2-3b'), 'ollama')
+        self.assertEqual(router.provider_of('gpt-6-astra'), 'openai')
+        async def fake_claude(req, *a, **k):
+            out = dict(result(), id='resp_c1')
+            out['output'].append({'type': 'function_call', 'id': 'fc', 'call_id': 'c', 'name': 'exec', 'arguments': '{}', 'status': 'completed'})
+            out['usage'] = {'input_tokens': 1000, 'output_tokens': 20, 'total_tokens': 1020, 'input_tokens_details': {'cached_tokens': 900}}
+            out['rate_limit_headers'] = {'x-codex-primary-used-percent': '42', 'x-codex-primary-reset-at': '1789545600'}
+            return out
+        with patch('router.run_claude', fake_claude):
+            await r.claude_response({'model': 'claude-max-sonnet', 'prompt_cache_key': 'T1', 'input': 'go'})
+        turn = recorded[0]
+        self.assertEqual((turn['provider'], turn['kind'], turn['status'], turn['thread']), ('claude', 'turn', 'ok', 'T1'))
+        self.assertEqual((turn['input_tokens'], turn['cached_tokens'], turn['output_tokens'], turn['tool_calls'], turn['resumed']), (100, 900, 20, 1, 0))
+        self.assertEqual(recorded[1]['usage'], ('claude', 'five_hour', 0.42, 1789545600))
+        # Ollama models register into MODELS and dispatch through the Ollama runner.
+        fake_provider = types.SimpleNamespace(
+            discover=None, slug_for=lambda n: 'ollama-' + n.replace(':', '-'),
+            catalog_entry=lambda t, m: dict(t, slug='ollama-' + m['name'].replace(':', '-'), display_name=m['name']),
+            run_ollama=None)
+        async def discover(session, base_url): return [{'name': 'llama3.2:3b', 'context_length': 8192, 'vision': False}]
+        calls = []
+        async def run_ollama(req, session, base_url, name, timeout, sid, resume, delta):
+            calls.append((req['model'], base_url, name)); return dict(result(), id='resp_o1', model=req['model'])
+        fake_provider.discover = discover; fake_provider.run_ollama = run_ollama
+        base = Path(self.temp.name) / 'models.base.json'
+        base.write_text(json.dumps({'models': [{'slug': 'claude-max-sonnet', 'display_name': 'Claude Sonnet 5 · Max', 'input_modalities': ['text', 'image']}]}))
+        r.base_catalog = base
+        with patch('router.ollama_provider', fake_provider):
+            info = await r.refresh_ollama()
+            self.assertEqual(info['models'][0]['slug'], 'ollama-llama3.2-3b')
+            self.assertIn('ollama-llama3.2-3b', adapter.MODELS)
+            generated = json.loads(r.catalog.read_text())['models']
+            self.assertEqual([m['slug'] for m in generated], ['claude-max-sonnet', 'ollama-llama3.2-3b'])
+            await r.claude_response({'model': 'ollama-llama3.2-3b', 'input': 'hi'})
+            self.assertEqual(calls, [('ollama-llama3.2-3b', 'http://127.0.0.1:11434', 'llama3.2:3b')])
+            self.assertEqual(recorded[-1]['provider'], 'ollama')
+            self.assertEqual(r.counts['ollama'], 1)
+            # A second refresh with nothing found unregisters the slug.
+            async def none(session, base_url): return []
+            fake_provider.discover = none
+            await r.refresh_ollama()
+            self.assertNotIn('ollama-llama3.2-3b', adapter.MODELS)
+            self.assertFalse(r.ollama_online)
+        # Errors are recorded too.
+        async def boom(req, *a, **k): raise BridgeError('nope')
+        with patch('router.run_claude', boom):
+            with self.assertRaises(BridgeError):
+                await r.claude_response({'model': 'claude-max-sonnet', 'input': 'go'})
+        self.assertEqual((recorded[-1]['status'], recorded[-1]['error']), ('error', 'nope'))
+
+    async def test_settings_persist(self):
+        r = self.app['router']
+        self.assertEqual(r.settings['ollama']['base_url'], 'http://127.0.0.1:11434')
+        r.settings['ollama']['enabled'] = False
+        r.save_settings()
+        again = router.Router(r.catalog, '/unused/claude', r.state)
+        self.assertFalse(again.settings['ollama']['enabled'])
+        self.assertEqual(again.settings['ollama']['base_url'], 'http://127.0.0.1:11434')
+
     async def test_history_sized_for_subagent_fanout(self):
         r = self.app['router']
         self.assertGreaterEqual(r.semaphore._value, 4)
