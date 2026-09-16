@@ -439,8 +439,9 @@ class Router:
 
     async def startup(self, app):
         self.prune_sessions()
-        if stats_module is not None and self.stats is None:
-            self.stats = stats_module.Stats(self.state / 'stats.sqlite')
+        if stats_module is not None:
+            if self.stats is None:
+                self.stats = stats_module.Stats(self.state / 'stats.sqlite')
             await self.stats.open()
         self.session = ClientSession(timeout=ClientTimeout(total=360), trust_env=False)
         try:
@@ -878,6 +879,9 @@ def create_app(catalog, claude, state, grok=None, port=18740, base_catalog=None)
         router.stats = stats_module.Stats(router.state / 'stats.sqlite')
         static_dir = Path(__file__).parent / 'dashboard'
         app.add_subapp('/api/v1', dashboard_api.build(router, router.stats, static_dir))
+        async def to_dashboard(request):
+            raise web.HTTPFound('/dashboard/')
+        app.router.add_get('/dashboard', to_dashboard)  # the sub-app only owns '/dashboard/...'
         app.add_subapp('/dashboard', dashboard_api.static_app(static_dir))
     app.router.add_route('*', '/{path:.*}', router.handle)
     return app
